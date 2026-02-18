@@ -4,7 +4,6 @@ benchmarks/
 common/**/*.o
 common/**/*.d
 
-frontend/
 hotspot_tool/
 sift/
 tools/*.pyc
@@ -16,3 +15,14 @@ decoder_lib/*.d
 decoder_lib/*.a
 decoder_lib/*.o
 
+frontend/pin-frontend/bbv_count.o
+frontend/pin-frontend/obj-intel64/globals.o
+frontend/pin-frontend/obj-intel64/pin_frontend
+frontend/pin-frontend/obj-intel64/pin_frontend.o
+lib/libcarbon_sim.a
+lib/sniper
+scripts/reliability.pyc
+standalone/exceptions.d
+standalone/exceptions.o
+standalone/standalone.d
+standalone/standalone.o
