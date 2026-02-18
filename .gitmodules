@@ -1,13 +1,17 @@
 [submodule "xed"]
 	path = xed
 	url = https://github.com/intelxed/xed.git
+	ignore = all
 [submodule "mbuild"]
 	path = mbuild
 	url = https://github.com/intelxed/mbuild.git
+	ignore = all
 [submodule "hotsniper-reliability"]
 	path = hotsniper-reliability
 	url = https://github.com/spolstra/hotsniper-reliability.git
+	ignore = all
 [submodule "cacti"]
 	path = cacti
 	url = https://github.com/sejproo/cacti.git
 	branch = master
+	ignore = all

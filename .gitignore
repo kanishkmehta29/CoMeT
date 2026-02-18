@@ -1,0 +1,18 @@
+# Ignore benchmarks directory (tracked files will be untracked separately)
+benchmarks/
+
+common/**/*.o
+common/**/*.d
+
+frontend/
+hotspot_tool/
+sift/
+tools/*.pyc
+
+config/buildconf.makefile
+config/buildconf.sh
+config/sniper.py
+decoder_lib/*.d
+decoder_lib/*.a
+decoder_lib/*.o
+
