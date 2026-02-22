@@ -236,6 +236,23 @@ These policies are implemented in `common/scheduler/policies`.
 Mapping policies derive from `MappingPolicy`, DVFS policies derive from `DVFSPolicy`.
 After implementing your policy, instantiate it in `SchedulerOpen::initMappingPolicy` / `SchedulerOpen::initDVFSPolicy`.
 
+Priority CFS-like Scheduler (`cfs_lite`)
+
+- enable with `scheduler/type=cfs_lite`
+- configuration is under `scheduler/cfs_lite` in `base.cfg`:
+    - `target_latency`, `min_granularity`
+    - `priority_mode` (`off`, `default`, `per_task`)
+    - `default_priority`, `per_task_priorities`
+    - `core_mask`
+- DTM hook toggles are under `scheduler/cfs_lite/dtm`:
+    - `enable_migration`
+    - `enable_yield`
+
+Notes:
+- `cfs_lite` provides simulator-level virtual runtime fairness and weighted timeslicing.
+- It is intentionally not Linux-kernel CFS feature-complete (no sleep credit / wakeup-preemption parity / cgroup semantics).
+- DTM integration points are present with TODO markers to call policy decisions that can trigger yield/migration actions.
+
 </details>
 
 ### 3.4 Build verification test suite
