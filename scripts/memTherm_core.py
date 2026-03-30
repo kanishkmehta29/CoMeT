@@ -124,6 +124,7 @@ c_hotspot_layer_file  =   hotspot_config_path + sim.config.get('hotspot/layer_fi
 
 # Output Parameters for hotspot simulation
 combined_temperature_trace_file = sim.config.get('hotspot/log_files/combined_temperature_trace_file')
+combined_instruction_trace_file = combined_temperature_trace_file.replace("temperature", "instruction")
 combined_insttemperature_trace_file = sim.config.get('hotspot/log_files/combined_insttemperature_trace_file')
 combined_power_trace_file = sim.config.get('hotspot/log_files/combined_power_trace_file')
 combined_instpower_trace_file = sim.config.get('hotspot/log_files/combined_instpower_trace_file')
@@ -330,6 +331,7 @@ class memTherm:
         'stat_rd_lowpower': [ self.getStatsGetter(stat_component_rd_lowpower, bank, stat_name_read_lowpower) for bank in range(NUM_BANKS) ],
         'stat_wr_lowpower': [ self.getStatsGetter(stat_component_wr_lowpower, bank, stat_name_write_lowpower) for bank in range(NUM_BANKS) ],
         'stat_bank_mode': [ self.getStatsGetter(stat_component_bank_mode, bank, stat_name_bank_mode) for bank in range(NUM_BANKS)],
+        'instrs': [ self.getStatsGetter('performance_model', core, 'instruction_count') for core in range(sim.config.ncores) ],
       }
     else:
       self.stats = {
@@ -338,8 +340,15 @@ class memTherm:
       'stat_rd': [ self.getStatsGetter(stat_component_rd, bank, stat_name_read) for bank in range(NUM_BANKS) ],
       'stat_wr': [ self.getStatsGetter(stat_component_wr, bank, stat_name_write) for bank in range(NUM_BANKS) ],
       'stat_bank_mode': [ self.getStatsGetter(stat_component_bank_mode, bank, stat_name_bank_mode) for bank in range(NUM_BANKS)],
+      'instrs': [ self.getStatsGetter('performance_model', core, 'instruction_count') for core in range(sim.config.ncores) ],
       }
     #print the initial header into different log/trace files
+    core_header = ""
+    for core in range(sim.config.ncores):
+        core_header += "C_" + str(core) + "\t"
+    with open(combined_instruction_trace_file, "w") as f:
+        f.write("%s\n" % core_header)
+
     gen_ptrace_header()
     ptrace_header = gen_ptrace_header()
     with open(full_temperature_trace_file, "w") as f:
@@ -688,6 +697,16 @@ class memTherm:
 
   # invokes hotspot to generate the temperature trace
   def calc_temperature_trace(self, time, time_delta):
+    # Retrieve and write instruction trace
+    instr_trace_string = ""
+    for core in range(sim.config.ncores):
+        instrs = self.stats['instrs'][core].delta
+        if instrs is None:
+            instrs = 0
+        instr_trace_string += str(instrs) + "\t"
+    with open(combined_instruction_trace_file, "a") as f:
+        f.write("%s\n" % instr_trace_string)
+
 #   print power_trace
     #invoke energystats function to compute core power trace
     self.ES.periodic(time, time_delta)

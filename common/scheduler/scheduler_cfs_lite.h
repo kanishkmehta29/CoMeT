@@ -2,11 +2,19 @@
 #define __SCHEDULER_CFS_LITE_H
 
 #include "scheduler_dynamic.h"
+#include "performance_counters.h"
+#include "policies/dvfspolicy.h"
+#include "policies/drampolicy.h"
+#include "policies/coreMemDTM.h"
+#include "policies/dtmpolicy.h"
+
+#include <deque>
 
 class SchedulerCFSLite : public SchedulerDynamic
 {
    public:
       SchedulerCFSLite(ThreadManager *thread_manager);
+      virtual ~SchedulerCFSLite();
 
       virtual core_id_t threadCreate(thread_id_t thread_id);
       virtual void threadYield(thread_id_t thread_id);
@@ -74,18 +82,42 @@ class SchedulerCFSLite : public SchedulerDynamic
       bool m_dtm_enable_migration;
       bool m_dtm_enable_yield;
 
+      // DTM/DVFS state
+      PerformanceCounters *m_performance_counters;
+      DVFSPolicy *m_dvfs_policy;
+      DramPolicy *m_dram_policy;
+      DtmPolicy  *m_dtm_policy;    ///< Pluggable thermal management policy (nullptr = off)
+      SubsecondTime m_dvfs_epoch;
+      SubsecondTime m_dram_epoch;
+
       // State
       SubsecondTime m_last_periodic;
       std::vector<ThreadInfo> m_thread_info;
       std::vector<thread_id_t> m_core_thread_running;
       std::vector<SubsecondTime> m_slice_left;
+      std::vector<std::deque<thread_id_t> > m_core_runqueues;
+      std::vector<core_id_t> m_thread_home_core;
+
+      // Debug logging state
+      bool m_debug_logs_enabled;
+      SubsecondTime m_debug_log_period;
+      SubsecondTime m_last_debug_log;
 
       // Helpers
       void threadSetInitialAffinity(thread_id_t thread_id);
       void ensureThreadInfoSize(thread_id_t thread_id);
+      core_id_t pickHomeCoreForThread(thread_id_t thread_id) const;
+      core_id_t ensureHomeCore(thread_id_t thread_id);
+      bool removeThreadFromRunqueue(core_id_t core_id, thread_id_t thread_id);
+      void enqueueThreadOnHomeCore(thread_id_t thread_id);
+      bool hasRunnablePinnedThread(core_id_t core_id) const;
       int getThreadPriority(thread_id_t thread_id) const;
       double priorityToWeight(int priority) const;
       SubsecondTime computeTimeSlice(thread_id_t thread_id) const;
+
+      void logCoreAssignments(const char *reason, SubsecondTime time, bool force = false);
+      UInt64 countRunnableThreads() const;
+      UInt64 countRunningThreads() const;
 
       void updateRunningVruntime(SubsecondTime now);
       void rescheduleCore(SubsecondTime time, core_id_t core_id, bool force_reschedule);
@@ -94,6 +126,14 @@ class SchedulerCFSLite : public SchedulerDynamic
 
       void migrateThread(thread_id_t thread_id, core_id_t to_core, SubsecondTime time);
       void handleDTM(SubsecondTime time);
+
+      void initDVFSPolicy(const String &logic);
+      void executeDVFSPolicy();
+      void initDramPolicy(const String &logic);
+      void executeDramPolicy();
+      void initDtmPolicy(const String &logic);
+      void setCoreFrequency(int core_id, int frequency);
+      void setMemBankMode(int bank_id, int mode);
 };
 
 #endif // __SCHEDULER_CFS_LITE_H
