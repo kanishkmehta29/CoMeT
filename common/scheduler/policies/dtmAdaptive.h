@@ -42,7 +42,9 @@ public:
                 float t_recover,
                 int   k_max,
                 float slack_scale,
-                float mem_intensity_threshold);
+                float mem_intensity_threshold,
+                float mpki_threshold,
+                int   freq_history_len);
 
     virtual ~DtmAdaptive() = default;
 
@@ -73,9 +75,21 @@ private:
     int   m_k_max;                      ///< Max banks throttled per channel per call.
     float m_slack_scale;                ///< Exponential curve steepness (°C).
     float m_mem_intensity_threshold;    ///< Core-util threshold for memory-intensive classification.
+    float m_mpki_threshold;             ///< MPKI above which a core is considered memory-bound.
+    int   m_freq_history_len;           ///< Number of past epochs to retain for thrashing detection.
 
     /// Tracks which banks are currently in low-power/LTM mode.
     std::vector<bool> m_bank_throttled;
+
+    /**
+     * Per-core ring buffer of recent observed frequencies (MHZ).
+     * Updated each DTM tick via recordFreq().
+     * Used by isThrashing() to detect sustained frequency suppression.
+     */
+    std::vector<std::deque<int>> m_freq_history;
+
+    /// Append current freq for core to its history ring-buffer.
+    void recordFreq(int core_id);
 
     // ── Core-side helpers ────────────────────────────────────────────────────
     bool isMemoryBound(int core_id) const;

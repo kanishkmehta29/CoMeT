@@ -51,7 +51,9 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters* perf_counters,
                          float t_recover,
                          int   k_max,
                          float slack_scale,
-                         float mem_intensity_threshold)
+                         float mem_intensity_threshold,
+                         float mpki_threshold,
+                         int   freq_history_len)
    : m_perf(perf_counters)
    , m_num_cores(num_cores)
    , m_cores_in_x(cores_in_x)
@@ -69,7 +71,10 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters* perf_counters,
    , m_k_max(k_max)
    , m_slack_scale(slack_scale)
    , m_mem_intensity_threshold(mem_intensity_threshold)
+   , m_mpki_threshold(mpki_threshold)
+   , m_freq_history_len(std::max(1, freq_history_len))
    , m_bank_throttled(num_banks, false)
+   , m_freq_history(num_cores)
 {
    std::cout << "[DTM-Adaptive] initialized"
              << " t_warn=" << m_t_warn << " t_crit=" << m_t_crit
@@ -79,6 +84,8 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters* perf_counters,
              << " num_banks=" << m_num_banks
              << " channels=" << m_num_channels
              << " k_max=" << m_k_max
+             << " mpki_threshold=" << m_mpki_threshold
+             << " freq_history_len=" << m_freq_history_len
              << std::endl;
 }
 
@@ -88,50 +95,179 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters* perf_counters,
 
 /**
  * isMemoryBound
- * Compute utilisation < 0.6 → more than 40 % of cycles are memory/sync stalls.
+ *
+ * Classifies a core as memory-bound using MPKI (Misses Per Kilo Instruction).
+ *
+ * MPKI = (mem_dram_cpi / total_cpi) * 1000
+ *
+ * This gives the fraction of cycles spent waiting on DRAM, scaled per thousand
+ * instructions.  A high MPKI means the core stalls heavily on memory and is
+ * memory-bound.  The threshold (m_mpki_threshold, e.g., 10.0) is configurable
+ * in base.cfg via scheduler/cfs_lite/dtm/adaptive/mpki_threshold.
+ *
+ * Falls back to the old utilization heuristic if DRAM CPI data is unavailable
+ * (metric returns 0 before the first epoch is warmup complete).
  */
 bool DtmAdaptive::isMemoryBound(int core_id) const
 {
    if (!m_perf) return false;
-   double util = m_perf->getUtilizationOfCore(core_id);
-   return (util >= 0.0 && util < 0.6);
+
+   double total_cpi = m_perf->getCPIOfCore(core_id);
+   if (total_cpi <= 0.0) {
+      // Fallback: use compute utilization if CPI data not yet available.
+      double util = m_perf->getUtilizationOfCore(core_id);
+      return (util >= 0.0 && util < 0.6);
+   }
+
+   // DRAM stall CPI: cycles spent waiting on off-chip memory per instruction.
+   double dram_cpi = m_perf->getCPIStackPartOfCore(core_id, "mem-dram");
+
+   // Compute MPKI as the fraction of total CPI that is DRAM stalls, ×1000.
+   // This normalises against workload intensity rather than raw frequency.
+   double mpki = (dram_cpi / total_cpi) * 1000.0;
+
+   std::cout << "[DTM-Adaptive] isMemoryBound core " << core_id
+             << " dram_cpi=" << dram_cpi
+             << " total_cpi=" << total_cpi
+             << " MPKI=" << mpki
+             << " threshold=" << m_mpki_threshold
+             << " => " << (mpki >= m_mpki_threshold ? "YES" : "NO")
+             << std::endl;
+
+   return (mpki >= m_mpki_threshold);
+}
+
+/**
+ * recordFreq
+ *
+ * Appends the current frequency of core_id to its sliding history window.
+ * Keeps only the last m_freq_history_len observations.
+ * Called once per DTM tick, before any decisions are made for that core.
+ */
+void DtmAdaptive::recordFreq(int core_id)
+{
+   if (!m_perf) return;
+   if (core_id < 0 || core_id >= m_num_cores) return;
+
+   int f = m_perf->getFreqOfCore(core_id);
+   if (f <= 0) return;  // Not yet initialised.
+
+   auto& hist = m_freq_history[core_id];
+   hist.push_back(f);
+   while ((int)hist.size() > m_freq_history_len)
+      hist.pop_front();
 }
 
 /**
  * isThrashing
- * Core temperature has exceeded T_warn by more than 3 °C.  At this point
- * a compute-bound HP task is better migrated than throttled in place.
+ *
+ * A core is considered thermally thrashing when BOTH of the following hold:
+ *
+ *   (1) Temperature has been persistently elevated above T_warn + 3 °C.
+ *       This avoids triggering on a brief, transient spike.
+ *
+ *   (2) The core's frequency has been on a sustained downward trend over the
+ *       last m_freq_history_len epochs.  Specifically, we require that the
+ *       average frequency over the second half of the window is strictly lower
+ *       than over the first half, AND that the absolute drop from the oldest
+ *       recorded frequency to the current reading exceeds one step (freq_step).
+ *
+ * The frequency criterion prevents false-positives: if a core is hot but its
+ * frequency is stable (e.g., it was already capped), we don't call it thrashing
+ * and avoid needlessly migrating a well-running HP thread.
  */
 bool DtmAdaptive::isThrashing(int core_id) const
 {
    if (!m_perf) return false;
+
+   // ── Condition 1: Temperature persistently elevated ───────────────────────
    double T = m_perf->getTemperatureOfCore(core_id);
-   return (T > 0.0 && T > (m_t_warn + 3.0));
+   if (T <= 0.0 || T <= (m_t_warn + 3.0))
+      return false;
+
+   // ── Condition 2: Sustained downward frequency trend ───────────────────────
+   const auto& hist = m_freq_history[core_id];
+   if ((int)hist.size() < m_freq_history_len)
+      return false;  // Not enough history yet — be conservative.
+
+   int n    = (int)hist.size();
+   int half = n / 2;
+
+   // Average frequency in the first (older) half of the window.
+   double avg_old = 0.0;
+   for (int k = 0; k < half; ++k)
+      avg_old += hist[k];
+   avg_old /= half;
+
+   // Average frequency in the second (newer) half of the window.
+   double avg_new = 0.0;
+   for (int k = half; k < n; ++k)
+      avg_new += hist[k];
+   avg_new /= (n - half);
+
+   // The absolute drop from the oldest sample to the current sample.
+   int drop = hist.front() - hist.back();
+
+   bool trending_down = (avg_new < avg_old) && (drop >= m_freq_step);
+
+   std::cout << "[DTM-Adaptive] isThrashing core " << core_id
+             << " T=" << T
+             << " avg_old_freq=" << avg_old
+             << " avg_new_freq=" << avg_new
+             << " drop=" << drop
+             << " => " << (trending_down ? "THRASHING" : "stable")
+             << std::endl;
+
+   return trending_down;
 }
 
 /**
- * getVerticalNeighbors
- * Returns the cores directly above and below in the Y dimension of the XY grid,
- * wrapping around. Returns an empty vector for single-row layouts.
+ * getVerticalNeighbors (Improved for 3D Stacks)
+ * Returns cores directly above/below in the 3D stack (Z-axis) 
+ * and adjacent cores in the planar Y-dimension.
+ * * Logic:
+ * 1. Identify Z-neighbors (same X,Y but different layer).
+ * 2. Identify Y-neighbors within the same layer.
+ * 3. REMOVE wrap-around: Heat does not jump across chip edges.
  */
 std::vector<int> DtmAdaptive::getVerticalNeighbors(int core_id) const
 {
    std::vector<int> neighbors;
-   if (m_cores_in_y <= 1)
-      return neighbors;
+   int cores_per_layer = m_cores_in_x * m_cores_in_y; [cite: 1]
+   
+   if (cores_per_layer <= 0) return neighbors;
 
-   int x        = core_id % m_cores_in_x;
-   int y        = core_id / m_cores_in_x;
+   // ── 1. 3D Z-Axis Neighbors (The Primary Thermal Coupling) ──
+   // Core directly above in the stack (next layer up)
+   int n_above_z = core_id + cores_per_layer;
+   if (n_above_z < m_num_cores) [cite: 1]
+      neighbors.push_back(n_above_z);
 
-   int y_below  = (y + 1) % m_cores_in_y;
-   int n_below  = y_below * m_cores_in_x + x;
-   if (n_below != core_id && n_below >= 0 && n_below < m_num_cores)
-      neighbors.push_back(n_below);
+   // Core directly below in the stack (layer underneath)
+   int n_below_z = core_id - cores_per_layer;
+   if (n_below_z >= 0)
+      neighbors.push_back(n_below_z);
 
-   int y_above  = (y - 1 + m_cores_in_y) % m_cores_in_y;
-   int n_above  = y_above * m_cores_in_x + x;
-   if (n_above != core_id && n_above >= 0 && n_above < m_num_cores && n_above != n_below)
-      neighbors.push_back(n_above);
+   // ── 2. 2D Y-Axis Neighbors (Planar Vertical) ──
+   // We use these as secondary thermal sinks within the same layer.
+   int x            = core_id % m_cores_in_x; [cite: 1]
+   int pos_in_layer = core_id % cores_per_layer;
+   int y            = pos_in_layer / m_cores_in_x; [cite: 1]
+   int layer_base   = (core_id / cores_per_layer) * cores_per_layer;
+
+   // Neighbor 'South' (Y+1) - NO wrap-around (replaces the % operator)
+   if (y + 1 < m_cores_in_y) [cite: 1]
+   {
+      int n_south = layer_base + (y + 1) * m_cores_in_x + x;
+      if (n_south < m_num_cores) neighbors.push_back(n_south);
+   }
+
+   // Neighbor 'North' (Y-1) - NO wrap-around
+   if (y - 1 >= 0)
+   {
+      int n_north = layer_base + (y - 1) * m_cores_in_x + x;
+      if (n_north >= 0) neighbors.push_back(n_north);
+   }
 
    return neighbors;
 }
@@ -201,9 +337,12 @@ std::vector<int> DtmAdaptive::getBanksForCore(int core_id) const
 std::vector<int> DtmAdaptive::banksForChannel(int ch) const
 {
    std::vector<int> banks;
-   int start = ch * m_banks_per_channel;
-   int end   = std::min(start + m_banks_per_channel, m_num_banks);
-   for (int b = start; b < end; ++b) banks.push_back(b);
+   // In an interleaved system, Bank ID 'b' belongs to Channel 'ch' 
+   // if (b % m_num_channels == ch).
+   for (int b = ch; b < m_num_banks; b += m_num_channels)
+   {
+      banks.push_back(b);
+   }
    return banks;
 }
 
@@ -258,6 +397,9 @@ std::vector<DtmDecision> DtmAdaptive::getDecisions(
 
    for (int i = 0; i < m_num_cores; ++i)
    {
+      // Update frequency history for this core at the start of every tick.
+      recordFreq(i);
+
       // ── Phase A: Thermal check ─────────────────────────────────────────────
       double T = m_perf->getTemperatureOfCore(i);
 

@@ -519,6 +519,8 @@ void SchedulerCFSLite::initDtmPolicy(const String &logic)
       int   k_max      = Sim()->getCfg()->getInt("scheduler/cfs_lite/dtm/adaptive/k_max");
       float slack_scale= (float)Sim()->getCfg()->getFloat("scheduler/cfs_lite/dtm/adaptive/slack_scale");
       float mem_thresh = (float)Sim()->getCfg()->getFloat("scheduler/cfs_lite/dtm/adaptive/mem_intensity_threshold");
+      float mpki_thresh= (float)Sim()->getCfg()->getFloat("scheduler/cfs_lite/dtm/adaptive/mpki_threshold");
+      int   freq_hist  = Sim()->getCfg()->getInt("scheduler/cfs_lite/dtm/adaptive/freq_history_len");
 
       m_dtm_policy = new DtmAdaptive(
           m_performance_counters,
@@ -526,7 +528,8 @@ void SchedulerCFSLite::initDtmPolicy(const String &logic)
           num_banks, num_channels,
           t_warn, t_crit, alpha_mem,
           min_freq, freq_step,
-          t_recover, k_max, slack_scale, mem_thresh);
+          t_recover, k_max, slack_scale, mem_thresh,
+          mpki_thresh, freq_hist);
 
       std::cout << "[CFS-Lite] DTM policy: adaptive"
                 << "  t_warn=" << t_warn
@@ -535,6 +538,8 @@ void SchedulerCFSLite::initDtmPolicy(const String &logic)
                 << "  min_freq=" << min_freq << " MHz"
                 << "  channels=" << num_channels
                 << "  k_max=" << k_max
+                << "  mpki_threshold=" << mpki_thresh
+                << "  freq_history_len=" << freq_hist
                 << std::endl;
       return;
    }
