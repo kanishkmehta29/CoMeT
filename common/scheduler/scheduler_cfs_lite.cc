@@ -261,23 +261,23 @@ void SchedulerCFSLite::logCoreAssignments(const char *reason, SubsecondTime time
    if (!force && (time - m_last_debug_log) < m_debug_log_period)
       return;
 
-   std::ostringstream oss;
-   oss << "[CFS-Lite] map reason=" << reason
-       << " t=" << time.getNS() << "ns"
-       << " runnable=" << countRunnableThreads()
-       << " running=" << countRunningThreads()
-       << " mapping:";
+   // std::ostringstream oss;
+   // oss << "[CFS-Lite] map reason=" << reason
+   //     << " t=" << time.getNS() << "ns"
+   //     << " runnable=" << countRunnableThreads()
+   //     << " running=" << countRunningThreads()
+   //     << " mapping:";
 
    for (core_id_t core_id = 0; core_id < (core_id_t)m_core_thread_running.size(); ++core_id)
    {
       thread_id_t tid = m_core_thread_running[core_id];
-      if (tid == INVALID_THREAD_ID)
-         oss << " c" << core_id << "=idle";
-      else
-         oss << " c" << core_id << "=t" << tid;
+      // if (tid == INVALID_THREAD_ID)
+      //    oss << " c" << core_id << "=idle";
+      // else
+      //    oss << " c" << core_id << "=t" << tid;
    }
 
-   std::cout << oss.str() << std::endl;
+   //std::cout << oss.str() << std::endl;
    m_last_debug_log = time;
 }
 
@@ -788,31 +788,31 @@ void SchedulerCFSLite::rescheduleCore(SubsecondTime time, core_id_t core_id, boo
 
    thread_id_t next = pickNextThread(core_id, time);
 
-   if (current != next)
-   {
-      if (next == INVALID_THREAD_ID)
-      {
-         std::cout << "[CFS-Lite] reschedule c" << core_id
-                   << " t" << (unsigned long long)current
-                   << " -> idle @ " << (unsigned long long)time.getNS() << "ns"
-                   << std::endl;
-      }
-      else if (current == INVALID_THREAD_ID)
-      {
-         std::cout << "[CFS-Lite] reschedule c" << core_id
-                   << " idle -> t" << (unsigned long long)next
-                   << " @ " << (unsigned long long)time.getNS() << "ns"
-                   << std::endl;
-      }
-      else
-      {
-         std::cout << "[CFS-Lite] reschedule c" << core_id
-                   << " t" << (unsigned long long)current
-                   << " -> t" << (unsigned long long)next
-                   << " @ " << (unsigned long long)time.getNS() << "ns"
-                   << std::endl;
-      }
-   }
+   // if (current != next)
+   // {
+   //    if (next == INVALID_THREAD_ID)
+   //    {
+   //       std::cout << "[CFS-Lite] reschedule c" << core_id
+   //                 << " t" << (unsigned long long)current
+   //                 << " -> idle @ " << (unsigned long long)time.getNS() << "ns"
+   //                 << std::endl;
+   //    }
+   //    else if (current == INVALID_THREAD_ID)
+   //    {
+   //       std::cout << "[CFS-Lite] reschedule c" << core_id
+   //                 << " idle -> t" << (unsigned long long)next
+   //                 << " @ " << (unsigned long long)time.getNS() << "ns"
+   //                 << std::endl;
+   //    }
+   //    else
+   //    {
+   //       std::cout << "[CFS-Lite] reschedule c" << core_id
+   //                 << " t" << (unsigned long long)current
+   //                 << " -> t" << (unsigned long long)next
+   //                 << " @ " << (unsigned long long)time.getNS() << "ns"
+   //                 << std::endl;
+   //    }
+   // }
 
    if (!force_reschedule && current != INVALID_THREAD_ID && current == next)
       return;
@@ -907,9 +907,9 @@ void SchedulerCFSLite::handleDTM(SubsecondTime time)
          running[c] = (int)tid;
    }
 
-   std::map<int,int> priorities;
+   std::map<int,double> weights;
    for (thread_id_t tid = 0; tid < (thread_id_t)m_thread_info.size(); ++tid)
-      priorities[(int)tid] = m_thread_info[tid].getPriority();
+      weights[(int)tid] = m_thread_info[tid].getWeight();
 
    std::vector<bool> rq_empty(num_cores, true);
    for (int c = 0; c < num_cores; ++c)
@@ -917,7 +917,7 @@ void SchedulerCFSLite::handleDTM(SubsecondTime time)
 
    // Ask the policy for decisions, then execute each one.
    std::vector<DtmDecision> decisions =
-      m_dtm_policy->getDecisions(running, priorities, rq_empty);
+      m_dtm_policy->getDecisions(running, weights, rq_empty);
 
    for (const DtmDecision& d : decisions)
    {

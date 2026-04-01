@@ -74,7 +74,7 @@ public:
 
     virtual std::vector<DtmDecision> getDecisions(
         const std::vector<int>&    core_thread_running,
-        const std::map<int,int>&   thread_priorities,
+        const std::map<int,double>& thread_weights,
         const std::vector<bool>&   core_rq_empty) = 0;
 };
 

@@ -14,6 +14,7 @@
 
 #include "dtmpolicy.h"
 #include "performance_counters.h"
+#include <deque>
 
 class DtmAdaptive : public DtmPolicy {
 public:
@@ -54,7 +55,7 @@ public:
      */
     virtual std::vector<DtmDecision> getDecisions(
         const std::vector<int>&    core_thread_running,
-        const std::map<int,int>&   thread_priorities,
+        const std::map<int,double>& thread_weights,
         const std::vector<bool>&   core_rq_empty) override;
 
 private:
@@ -81,6 +82,11 @@ private:
     /// Tracks which banks are currently in low-power/LTM mode.
     std::vector<bool> m_bank_throttled;
 
+    /// Delta MPKI state trackers per core
+    std::vector<uint64_t> m_prev_instr;
+    std::vector<uint64_t> m_prev_miss;
+    std::vector<double>   m_prev_mpki;
+
     /**
      * Per-core ring buffer of recent observed frequencies (MHZ).
      * Updated each DTM tick via recordFreq().
@@ -92,7 +98,7 @@ private:
     void recordFreq(int core_id);
 
     // ── Core-side helpers ────────────────────────────────────────────────────
-    bool isMemoryBound(int core_id) const;
+    bool isMemoryBound(int core_id);
     bool isThrashing(int core_id) const;
     std::vector<int> getVerticalNeighbors(int core_id) const;
     int  getCoolestIdleCore(const std::vector<int>& core_thread_running) const;

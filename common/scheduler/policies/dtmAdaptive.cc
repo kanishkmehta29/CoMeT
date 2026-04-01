@@ -161,12 +161,12 @@ bool DtmAdaptive::isMemoryBound(int core_id)
    else if (mpki < 10.0) nature = "Cache-friendly";
    else                  nature = "Memory-bound";
 
-   std::cout << "[DTM-Adaptive] memBound-Check core " << core_id
-             << " d_instr=" << d_instr
-             << " d_miss=" << d_miss
-             << " MPKI=" << mpki
-             << " (" << nature << ")"
-             << std::endl;
+   // std::cout << "[DTM-Adaptive] memBound-Check core " << core_id
+   //           << " d_instr=" << d_instr
+   //           << " d_miss=" << d_miss
+   //           << " MPKI=" << mpki
+   //           << " (" << nature << ")"
+   //           << std::endl;
 
    return (mpki >= m_mpki_threshold);
 }
@@ -267,14 +267,14 @@ bool DtmAdaptive::isThrashing(int core_id) const
 std::vector<int> DtmAdaptive::getVerticalNeighbors(int core_id) const
 {
    std::vector<int> neighbors;
-   int cores_per_layer = m_cores_in_x * m_cores_in_y; [cite: 1]
+   int cores_per_layer = m_cores_in_x * m_cores_in_y; 
    
    if (cores_per_layer <= 0) return neighbors;
 
    // ── 1. 3D Z-Axis Neighbors (The Primary Thermal Coupling) ──
    // Core directly above in the stack (next layer up)
    int n_above_z = core_id + cores_per_layer;
-   if (n_above_z < m_num_cores) [cite: 1]
+   if (n_above_z < m_num_cores) 
       neighbors.push_back(n_above_z);
 
    // Core directly below in the stack (layer underneath)
@@ -284,13 +284,13 @@ std::vector<int> DtmAdaptive::getVerticalNeighbors(int core_id) const
 
    // ── 2. 2D Y-Axis Neighbors (Planar Vertical) ──
    // We use these as secondary thermal sinks within the same layer.
-   int x            = core_id % m_cores_in_x; [cite: 1]
+   int x            = core_id % m_cores_in_x; 
    int pos_in_layer = core_id % cores_per_layer;
-   int y            = pos_in_layer / m_cores_in_x; [cite: 1]
+   int y            = pos_in_layer / m_cores_in_x; 
    int layer_base   = (core_id / cores_per_layer) * cores_per_layer;
 
    // Neighbor 'South' (Y+1) - NO wrap-around (replaces the % operator)
-   if (y + 1 < m_cores_in_y) [cite: 1]
+   if (y + 1 < m_cores_in_y) 
    {
       int n_south = layer_base + (y + 1) * m_cores_in_x + x;
       if (n_south < m_num_cores) neighbors.push_back(n_south);
@@ -421,7 +421,7 @@ double DtmAdaptive::bankScore(int bank_id) const
 
 std::vector<DtmDecision> DtmAdaptive::getDecisions(
       const std::vector<int>&    core_thread_running,
-      const std::map<int,int>&   thread_priorities,
+      const std::map<int,double>& thread_weights,
       const std::vector<bool>&   core_rq_empty)
 {
    std::vector<DtmDecision> decisions;
@@ -430,25 +430,25 @@ std::vector<DtmDecision> DtmAdaptive::getDecisions(
       return decisions;
 
    // ── Calculate relative priority baseline ──────────────────────────────────
-   // To avoid strict reliance on absolute nice values (e.g. < 0), we dynamically
-   // determine the average priority of all currently scheduled threads. Threads
-   // with a priority strictly lower than the average are classified as HP.
-   int total_prio = 0;
-   int prio_count = 0;
+   // To avoid strict reliance on absolute nice values, we dynamically
+   // determine the average weight of all currently scheduled threads. Threads
+   // with a weight strictly higher than the average are classified as HP.
+   double total_weight = 0.0;
+   int weight_count = 0;
    for (int i = 0; i < m_num_cores; ++i)
    {
       int tid = core_thread_running[i];
       if (tid != -1)
       {
-         auto it = thread_priorities.find(tid);
-         if (it != thread_priorities.end())
+         auto it = thread_weights.find(tid);
+         if (it != thread_weights.end())
          {
-            total_prio += it->second;
-            prio_count++;
+            total_weight += it->second;
+            weight_count++;
          }
       }
    }
-   double avg_prio = (prio_count > 0) ? (double)total_prio / prio_count : 0.0;
+   double avg_weight = (weight_count > 0) ? total_weight / weight_count : 0.0;
 
    for (int i = 0; i < m_num_cores; ++i)
    {
@@ -499,13 +499,13 @@ std::vector<DtmDecision> DtmAdaptive::getDecisions(
       if (thread_id == -1)
          continue;   // idle core — nothing to act on
 
-      // Look up thread priority (default 0 = normal if not found)
-      int prio = 0;
-      auto it  = thread_priorities.find(thread_id);
-      if (it != thread_priorities.end())
-         prio = it->second;
+      // Look up thread weight (default 0.0 if not found)
+      double weight = 0.0;
+      auto it  = thread_weights.find(thread_id);
+      if (it != thread_weights.end())
+         weight = it->second;
 
-      bool is_hp    = (prio < avg_prio);   // dynamically high priority vs peers
+      bool is_hp    = (weight > avg_weight);   // dynamically high priority vs peers
       bool rq_empty = core_rq_empty[i];
 
       // ── Memory-bound path ─────────────────────────────────────────────────
