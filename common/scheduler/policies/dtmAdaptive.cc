@@ -26,6 +26,8 @@
  */
 
 #include "dtmAdaptive.h"
+#include "simulator.h"
+#include "misc/stats.h"
 
 #include <algorithm>
 #include <cmath>
@@ -76,6 +78,10 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters* perf_counters,
    , m_bank_throttled(num_banks, false)
    , m_freq_history(num_cores)
 {
+   m_prev_instr.resize(num_cores, 0);
+   m_prev_miss.resize(num_cores, 0);
+   m_prev_mpki.resize(num_cores, 0.0);
+
    std::cout << "[DTM-Adaptive] initialized"
              << " t_warn=" << m_t_warn << " t_crit=" << m_t_crit
              << " t_recover=" << m_t_recover
@@ -108,30 +114,58 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters* perf_counters,
  * Falls back to the old utilization heuristic if DRAM CPI data is unavailable
  * (metric returns 0 before the first epoch is warmup complete).
  */
-bool DtmAdaptive::isMemoryBound(int core_id) const
+bool DtmAdaptive::isMemoryBound(int core_id)
 {
    if (!m_perf) return false;
 
-   double total_cpi = m_perf->getCPIOfCore(core_id);
-   if (total_cpi <= 0.0) {
-      // Fallback: use compute utilization if CPI data not yet available.
-      double util = m_perf->getUtilizationOfCore(core_id);
-      return (util >= 0.0 && util < 0.6);
+   // 1. Fetch current raw counters
+   StatsManager* stats = Sim()->getStatsManager();
+   StatsMetricBase* instr_metric = stats->getMetricObject("performance_model", core_id, "instruction_count");
+   uint64_t instr = instr_metric ? instr_metric->recordMetric() : 0;
+
+   // Try L3 first; if not present, fallback to L2
+   StatsMetricBase* miss_load  = stats->getMetricObject("L3", core_id, "load-misses");
+   StatsMetricBase* miss_store = stats->getMetricObject("L3", core_id, "store-misses");
+   if (!miss_load) {
+      miss_load  = stats->getMetricObject("L2", core_id, "load-misses");
+      miss_store = stats->getMetricObject("L2", core_id, "store-misses");
    }
 
-   // DRAM stall CPI: cycles spent waiting on off-chip memory per instruction.
-   double dram_cpi = m_perf->getCPIStackPartOfCore(core_id, "mem-dram");
+   uint64_t miss = 0;
+   if (miss_load)  miss += miss_load->recordMetric();
+   if (miss_store) miss += miss_store->recordMetric();
 
-   // Compute MPKI as the fraction of total CPI that is DRAM stalls, ×1000.
-   // This normalises against workload intensity rather than raw frequency.
-   double mpki = (dram_cpi / total_cpi) * 1000.0;
+   // 2. Compute deltas
+   uint64_t d_instr = instr > m_prev_instr[core_id] ? instr - m_prev_instr[core_id] : 0;
+   uint64_t d_miss  = miss > m_prev_miss[core_id] ? miss - m_prev_miss[core_id] : 0;
 
-   std::cout << "[DTM-Adaptive] isMemoryBound core " << core_id
-             << " dram_cpi=" << dram_cpi
-             << " total_cpi=" << total_cpi
+   // 3. Prevent noise if the core is heavily stalled (not enough instructions to sample)
+   // Provide a minimum threshold of ~10,000 instructions to generate a meaningful MPKI.
+   double mpki = m_prev_mpki[core_id]; // default to previous
+   if (d_instr >= 10000)
+   {
+      double raw_mpki = ((double)d_miss / (double)d_instr) * 1000.0;
+      
+      // 4. Exponential Moving Average to smooth oscillations
+      mpki = 0.7 * m_prev_mpki[core_id] + 0.3 * raw_mpki;
+   }
+
+   // 5. Save state for next tick
+   m_prev_instr[core_id] = instr;
+   m_prev_miss[core_id]  = miss;
+   m_prev_mpki[core_id]  = mpki;
+
+   // 6. Classification for output
+   std::string nature;
+   if (mpki < 1.0)       nature = "Compute-bound";
+   else if (mpki < 10.0) nature = "Cache-friendly";
+   else                  nature = "Memory-bound";
+
+   std::cout << "[DTM-Adaptive] memBound-Check core " << core_id
+             << " d_instr=" << d_instr
+             << " d_miss=" << d_miss
              << " MPKI=" << mpki
-             << " threshold=" << m_mpki_threshold
-             << " => " << (mpki >= m_mpki_threshold ? "YES" : "NO")
+             << " (" << nature << ")"
              << std::endl;
 
    return (mpki >= m_mpki_threshold);
@@ -395,6 +429,27 @@ std::vector<DtmDecision> DtmAdaptive::getDecisions(
    if (!m_perf)
       return decisions;
 
+   // ── Calculate relative priority baseline ──────────────────────────────────
+   // To avoid strict reliance on absolute nice values (e.g. < 0), we dynamically
+   // determine the average priority of all currently scheduled threads. Threads
+   // with a priority strictly lower than the average are classified as HP.
+   int total_prio = 0;
+   int prio_count = 0;
+   for (int i = 0; i < m_num_cores; ++i)
+   {
+      int tid = core_thread_running[i];
+      if (tid != -1)
+      {
+         auto it = thread_priorities.find(tid);
+         if (it != thread_priorities.end())
+         {
+            total_prio += it->second;
+            prio_count++;
+         }
+      }
+   }
+   double avg_prio = (prio_count > 0) ? (double)total_prio / prio_count : 0.0;
+
    for (int i = 0; i < m_num_cores; ++i)
    {
       // Update frequency history for this core at the start of every tick.
@@ -450,7 +505,7 @@ std::vector<DtmDecision> DtmAdaptive::getDecisions(
       if (it != thread_priorities.end())
          prio = it->second;
 
-      bool is_hp    = (prio < 0);   // negative nice-value → high priority
+      bool is_hp    = (prio < avg_prio);   // dynamically high priority vs peers
       bool rq_empty = core_rq_empty[i];
 
       // ── Memory-bound path ─────────────────────────────────────────────────
