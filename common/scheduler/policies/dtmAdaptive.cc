@@ -219,40 +219,34 @@ bool DtmAdaptive::isThrashing(int core_id) const
    if (T <= 0.0 || T <= (m_t_warn + 3.0))
       return false;
 
-   // ── Condition 2: Sustained downward frequency trend ───────────────────────
-   const auto& hist = m_freq_history[core_id];
-   if ((int)hist.size() < m_freq_history_len)
-      return false;  // Not enough history yet — be conservative.
+   // ── Condition 2: IPC drop (Compute-bound Thrashing) ───────────────────────
+   double total_ipc = 0.0;
+   int active_cores = 0;
+   for (int c = 0; c < m_num_cores; ++c)
+   {
+      double cpi = m_perf->getCPIOfCore(c);
+      if (cpi > 0.0)
+      {
+         total_ipc += (1.0 / cpi);
+         active_cores++;
+      }
+   }
+   
+   double avg_ipc = (active_cores > 0) ? (total_ipc / active_cores) : 0.0;
+   
+   double core_cpi = m_perf->getCPIOfCore(core_id);
+   double core_ipc = (core_cpi > 0.0) ? (1.0 / core_cpi) : 0.0;
 
-   int n    = (int)hist.size();
-   int half = n / 2;
-
-   // Average frequency in the first (older) half of the window.
-   double avg_old = 0.0;
-   for (int k = 0; k < half; ++k)
-      avg_old += hist[k];
-   avg_old /= half;
-
-   // Average frequency in the second (newer) half of the window.
-   double avg_new = 0.0;
-   for (int k = half; k < n; ++k)
-      avg_new += hist[k];
-   avg_new /= (n - half);
-
-   // The absolute drop from the oldest sample to the current sample.
-   int drop = hist.front() - hist.back();
-
-   bool trending_down = (avg_new < avg_old) && (drop >= m_freq_step);
+   bool is_thrashing = (core_ipc < avg_ipc);
 
    std::cout << "[DTM-Adaptive] isThrashing core " << core_id
              << " T=" << T
-             << " avg_old_freq=" << avg_old
-             << " avg_new_freq=" << avg_new
-             << " drop=" << drop
-             << " => " << (trending_down ? "THRASHING" : "stable")
+             << " core_ipc=" << core_ipc
+             << " avg_ipc=" << avg_ipc
+             << " => " << (is_thrashing ? "THRASHING" : "stable")
              << std::endl;
 
-   return trending_down;
+   return is_thrashing;
 }
 
 /**
@@ -307,21 +301,36 @@ std::vector<int> DtmAdaptive::getVerticalNeighbors(int core_id) const
 }
 
 /**
- * getCoolestIdleCore
- * Scan all cores, return the one with the lowest temperature that has no
- * thread currently running.  Used to pick a migration destination.
+ * getCoolestTargetCore
+ * Scan all cores, returning a cooler core than the current source core
+ * that is running a task with a weight lower than the average weight.
+ * (Idle cores are naturally valid targets as well).
  */
-int DtmAdaptive::getCoolestIdleCore(const std::vector<int>& core_thread_running) const
+int DtmAdaptive::getCoolestTargetCore(int source_core, const std::vector<int>& core_thread_running, const std::map<int,double>& thread_weights, double avg_weight) const
 {
    if (!m_perf) return -1;
 
-   int    best = -1;
-   double best_temp = std::numeric_limits<double>::max();
+   double src_temp   = m_perf->getTemperatureOfCore(source_core);
+   int    best       = -1;
+   double best_temp  = src_temp; // Only consider cores strictly cooler than source
 
    for (int c = 0; c < m_num_cores; ++c)
    {
-      if (core_thread_running[c] != -1) // -1 == INVALID / idle
-         continue;
+      if (c == source_core) continue;
+
+      int tid = core_thread_running[c];
+      
+      if (tid != -1)
+      {
+         double weight_c = 0.0;
+         auto it = thread_weights.find(tid);
+         if (it != thread_weights.end())
+            weight_c = it->second;
+
+         // Target must be running a low-priority task (weight < avg_weight)
+         if (weight_c >= avg_weight)
+            continue; 
+      }
 
       double T = m_perf->getTemperatureOfCore(c);
       if (T > 0.0 && T < best_temp)
@@ -541,6 +550,7 @@ std::vector<DtmDecision> DtmAdaptive::getDecisions(
          std::cout << "[DTM-Adaptive] Branch1 yield core " << i
                    << " tid=" << thread_id
                    << " weight=" << weight
+                   << " avg_weight=" << avg_weight
                    << " T=" << T << std::endl;
          DtmDecision d;
          d.action    = DtmAction::YIELD;
@@ -566,8 +576,8 @@ std::vector<DtmDecision> DtmAdaptive::getDecisions(
       }
       else if (is_hp && isThrashing(i))
       {
-         // Branch 3: High-priority + thrashing → migrate to coolest idle core
-         int dst = getCoolestIdleCore(core_thread_running);
+         // Branch 3: High-priority + thrashing → migrate to a cooler valid core
+         int dst = getCoolestTargetCore(i, core_thread_running, thread_weights, avg_weight);
          if (dst != -1 && dst != i)
          {
             std::cout << "[DTM-Adaptive] Branch3 migrate HP tid=" << thread_id
@@ -581,7 +591,7 @@ std::vector<DtmDecision> DtmAdaptive::getDecisions(
          }
          else
          {
-            // Fallback: apply local DVFS if no cool idle core is found
+            // Fallback: apply local DVFS if no cool LP/idle core is found
             int cur_f = getCurrentFreq(i);
             int new_f = std::max(cur_f - m_freq_step, m_min_freq);
             if (new_f < cur_f)
