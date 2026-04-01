@@ -540,7 +540,7 @@ std::vector<DtmDecision> DtmAdaptive::getDecisions(
          // Branch 1: Low-priority, alternatives waiting → cooperative yield
          std::cout << "[DTM-Adaptive] Branch1 yield core " << i
                    << " tid=" << thread_id
-                   << " prio=" << prio
+                   << " weight=" << weight
                    << " T=" << T << std::endl;
          DtmDecision d;
          d.action    = DtmAction::YIELD;
@@ -611,11 +611,11 @@ std::vector<DtmDecision> DtmAdaptive::getDecisions(
             int tid_j = core_thread_running[j];
             if (tid_j != -1)
             {
-               int prio_j  = 0;
-               auto jt     = thread_priorities.find(tid_j);
-               if (jt != thread_priorities.end()) prio_j = jt->second;
+               double weight_j = 0.0;
+               auto jt     = thread_weights.find(tid_j);
+               if (jt != thread_weights.end()) weight_j = jt->second;
 
-               bool j_is_lp = (prio_j >= 0);
+               bool j_is_lp = (weight_j <= avg_weight);
                double T_j   = m_perf->getTemperatureOfCore(j);
 
                if (j_is_lp && T_j > 0.0 && T_j < m_t_warn)
