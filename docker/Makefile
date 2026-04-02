@@ -9,19 +9,19 @@ TZFULL=$(subst /, ,$(shell readlink /etc/localtime))
 TZ=$(word $(shell expr $(words $(TZFULL)) - 1 ),$(TZFULL))/$(word $(words $(TZFULL)),$(TZFULL))
 
 all: $(DOCKER_FILE)
-	docker build -f $(DOCKER_FILE) -t $(DOCKER_IMAGE) .
+	docker build -f $(DOCKER_FILE) -t $(DOCKER_IMAGE) ..
 
 # Use a .PHONY target to build all of the docker images if requested
 Dockerfile%.build: Dockerfile%
-       docker build --build-arg TZ_ARG=$(TZ) $(DOCKER_BUILD_OPT) -f $(<) -t ubuntu:$(subst Dockerfile-ubuntu-,,$(<))-sniper-$(USER) .
+		docker build --build-arg TZ_ARG=$(TZ) $(DOCKER_BUILD_OPT) -f $(<) -t ubuntu:$(subst Dockerfile-ubuntu-,,$(<))-sniper-$(USER) ..
 
 BUILD_ALL_TARGETS=$(foreach f,$(DOCKER_FILES),$(f).build)
 build-all: $(BUILD_ALL_TARGETS)
 
 run-root:
-	docker run --privileged --rm -it -v "${HOME}:${HOME}" $(DOCKER_IMAGE)
+	docker run --privileged --rm -it -v "$(shell pwd)/..:/workspace" -w "/workspace" $(DOCKER_IMAGE)
 
 run:
-	docker run --privileged --rm -it -v "${HOME}:${HOME}" --user $(shell id -u):$(shell id -g) -w "${PWD}" $(DOCKER_IMAGE)
+	docker run --privileged --rm -it -v "$(shell pwd)/..:/workspace" -w "/workspace" $(DOCKER_IMAGE)
 
 .PHONY: all build-all run-root run

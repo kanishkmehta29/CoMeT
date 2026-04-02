@@ -99,7 +99,14 @@ private:
 
     // ── Core-side helpers ────────────────────────────────────────────────────
     bool isMemoryBound(int core_id);
-    bool isThrashing(int core_id) const;
+    
+    struct CoreStats {
+        float ipc;
+        float stall_fraction;
+        float llc_mpki;
+    };
+    bool isThrashing(CoreStats coreStats) const;
+    
     std::vector<int> getVerticalNeighbors(int core_id) const;
     int  getCoolestTargetCore(int source_core, const std::vector<int>& core_thread_running, const std::map<int,double>& thread_weights, double avg_weight) const;
     int  getCurrentFreq(int core_id) const;
