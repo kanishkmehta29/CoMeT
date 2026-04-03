@@ -60,6 +60,7 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters *perf_counters,
   m_prev_instr.resize(num_cores, 0);
   m_prev_miss.resize(num_cores, 0);
   m_prev_mpki.resize(num_cores, 0.0);
+  m_yield_cooldown.resize(num_cores, 0);
 
   std::cout << "[DTM-Adaptive] initialized"
             << " t_warn=" << m_t_warn << " t_crit=" << m_t_crit
@@ -198,59 +199,83 @@ void DtmAdaptive::recordFreq(int core_id) {
  * and avoid needlessly migrating a well-running HP thread.
  */
 bool DtmAdaptive::isThrashing(CoreStats coreStats) const {
-  if (coreStats.ipc < 0.5f && coreStats.stall_fraction > 0.6f) {
-    return true;
+  bool thrash = (coreStats.ipc < 0.5f && coreStats.stall_fraction > 0.6f);
+
+  if (thrash) {
+    std::cout << "[DTM-Adaptive] thrashing-check"
+              << " ipc=" << coreStats.ipc
+              << " stall_frac=" << coreStats.stall_fraction
+              << " llc_mpki=" << coreStats.llc_mpki << " -> THRASHING"
+              << std::endl;
   }
-  return false;
+
+  return thrash;
 }
 
 /**
- * getVerticalNeighbors (Improved for 3D Stacks)
- * Returns cores directly above/below in the 3D stack (Z-axis)
- * and adjacent cores in the planar Y-dimension.
- * * Logic:
- * 1. Identify Z-neighbors (same X,Y but different layer).
- * 2. Identify Y-neighbors within the same layer.
- * 3. REMOVE wrap-around: Heat does not jump across chip edges.
+ * getAdjacentLpNeighbors (2D core topology)
+ *
+ * Returns adjacent (Manhattan) neighbours in the 2D mesh, but *only* those
+ * that are eligible LP heat-sinks for Branch 4 steal-throttling.
+ *
+ * Eligibility:
+ *  - idle neighbour (tid == -1) OR
+ *  - running a low-priority thread (weight <= avg_weight)
+ *
+ * No wrap-around across edges.
  */
-std::vector<int> DtmAdaptive::getVerticalNeighbors(int core_id) const {
+std::vector<int> DtmAdaptive::getAdjacentLpNeighbors(
+    int core_id, const std::vector<int> &core_thread_running,
+    const std::map<int, double> &thread_weights, double avg_weight) const {
   std::vector<int> neighbors;
-  int cores_per_layer = m_cores_in_x * m_cores_in_y;
+  if (m_cores_in_x <= 0 || m_cores_in_y <= 0)
+    return neighbors;
+  if (core_id < 0 || core_id >= m_num_cores)
+    return neighbors;
 
+  int cores_per_layer = m_cores_in_x * m_cores_in_y;
   if (cores_per_layer <= 0)
     return neighbors;
 
-  // ── 1. 3D Z-Axis Neighbors (The Primary Thermal Coupling) ──
-  // Core directly above in the stack (next layer up)
-  int n_above_z = core_id + cores_per_layer;
-  if (n_above_z < m_num_cores)
-    neighbors.push_back(n_above_z);
-
-  // Core directly below in the stack (layer underneath)
-  int n_below_z = core_id - cores_per_layer;
-  if (n_below_z >= 0)
-    neighbors.push_back(n_below_z);
-
-  // ── 2. 2D Y-Axis Neighbors (Planar Vertical) ──
-  // We use these as secondary thermal sinks within the same layer.
-  int x = core_id % m_cores_in_x;
+  // Clamp to the 2D mesh footprint even if m_num_cores is smaller.
   int pos_in_layer = core_id % cores_per_layer;
+  int x = pos_in_layer % m_cores_in_x;
   int y = pos_in_layer / m_cores_in_x;
   int layer_base = (core_id / cores_per_layer) * cores_per_layer;
 
-  // Neighbor 'South' (Y+1) - NO wrap-around (replaces the % operator)
-  if (y + 1 < m_cores_in_y) {
-    int n_south = layer_base + (y + 1) * m_cores_in_x + x;
-    if (n_south < m_num_cores)
-      neighbors.push_back(n_south);
-  }
+  auto is_lp_or_idle = [&](int nid) -> bool {
+    if (nid < 0 || nid >= m_num_cores)
+      return false;
+    if (nid >= (int)core_thread_running.size())
+      return false;
 
-  // Neighbor 'North' (Y-1) - NO wrap-around
-  if (y - 1 >= 0) {
-    int n_north = layer_base + (y - 1) * m_cores_in_x + x;
-    if (n_north >= 0)
-      neighbors.push_back(n_north);
-  }
+    int tid = core_thread_running[nid];
+    if (tid == -1)
+      return true; // idle => safe sink
+
+    double w = 0.0;
+    auto it = thread_weights.find(tid);
+    if (it != thread_weights.end())
+      w = it->second;
+    return (w <= avg_weight);
+  };
+
+  auto push_if_eligible = [&](int nid) {
+    if (is_lp_or_idle(nid))
+      neighbors.push_back(nid);
+  };
+
+  // West/East
+  if (x - 1 >= 0)
+    push_if_eligible(layer_base + y * m_cores_in_x + (x - 1));
+  if (x + 1 < m_cores_in_x)
+    push_if_eligible(layer_base + y * m_cores_in_x + (x + 1));
+
+  // North/South
+  if (y - 1 >= 0)
+    push_if_eligible(layer_base + (y - 1) * m_cores_in_x + x);
+  if (y + 1 < m_cores_in_y)
+    push_if_eligible(layer_base + (y + 1) * m_cores_in_x + x);
 
   return neighbors;
 }
@@ -415,6 +440,10 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     // Update frequency history for this core at the start of every tick.
     recordFreq(i);
 
+    // Decrement yield cooldown so Branch 1 can re-arm after YIELD_COOLDOWN_TICKS epochs.
+    if (m_yield_cooldown[i] > 0)
+      m_yield_cooldown[i]--;
+
     // ── Phase A: Thermal check ─────────────────────────────────────────────
     double T = m_perf->getTemperatureOfCore(i);
 
@@ -461,7 +490,7 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     if (it != thread_weights.end())
       weight = it->second;
 
-    bool is_hp = (weight > avg_weight); // dynamically high priority vs peers
+    bool is_hp = (weight >= avg_weight); // dynamically high priority vs peers
     bool rq_empty = core_rq_empty[i];
 
     // ── Memory-bound path ─────────────────────────────────────────────────
@@ -496,14 +525,26 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     stats.llc_mpki = (float)m_prev_mpki[i];
 
     if (!is_hp && !rq_empty) {
-      // Branch 1: Low-priority, alternatives waiting → cooperative yield
-      std::cout << "[DTM-Adaptive] Branch1 yield core " << i
-                << " tid=" << thread_id << " weight=" << weight
-                << " avg_weight=" << avg_weight << " T=" << T << std::endl;
-      DtmDecision d;
-      d.action = DtmAction::YIELD;
-      d.thread_id = thread_id;
-      decisions.push_back(d);
+      // Branch 1: Low-priority thread on hot core, alternatives waiting.
+      //
+      // Yield the current LP thread so a (potentially lighter) thread from
+      // this core's runqueue gets to run, generating less heat.
+      // The boomerang problem (same thread being re-selected immediately due
+      // to low vruntime) is handled in handleDTM: after YIELD the scheduler
+      // boosts the thread's vruntime to the current max so CFS picks a
+      // different thread first.
+      // Cooldown prevents emitting YIELD every single DTM tick.
+      if (m_yield_cooldown[i] == 0) {
+        std::cout << "[DTM-Adaptive] Branch1 yield core " << i
+                  << " tid=" << thread_id << " weight=" << weight
+                  << " avg_weight=" << avg_weight << " T=" << T << std::endl;
+        DtmDecision d;
+        d.action    = DtmAction::YIELD;
+        d.thread_id = thread_id;
+        decisions.push_back(d);
+        m_yield_cooldown[i] = YIELD_COOLDOWN_TICKS;
+      }
+      // else: cooldown active — do nothing this tick.
     } else if (!is_hp && rq_empty) {
       // Branch 2: Low-priority, run-queue empty → local DVFS scale-down
       int cur_f = getCurrentFreq(i);
@@ -551,38 +592,44 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
       // Steal-throttle the vertical neighbor: if it is cool and runs a
       // low-priority task, reduce its frequency to create a local thermal
       // sink — heat from the HP core dissipates into the cooler neighbour.
-      std::vector<int> neighbors = getVerticalNeighbors(i);
+      std::vector<int> neighbors = getAdjacentLpNeighbors(
+          i, core_thread_running, thread_weights, avg_weight);
+      bool throttled_neighbor = false;
       for (int j : neighbors) {
-        if (j >= (int)core_thread_running.size())
+        double T_j = m_perf->getTemperatureOfCore(j);
+        if (!(T_j > 0.0 && T_j < m_t_warn))
           continue;
 
-        int tid_j = core_thread_running[j];
-        if (tid_j != -1) {
-          double weight_j = 0.0;
-          auto jt = thread_weights.find(tid_j);
-          if (jt != thread_weights.end())
-            weight_j = jt->second;
+        int cur_f_j = getCurrentFreq(j);
+        int new_f_j = std::max(cur_f_j - m_freq_step, m_min_freq);
+        if (new_f_j < cur_f_j) {
+          std::cout << "[DTM-Adaptive] Branch4 steal-throttle neighbor core "
+                    << j << " " << cur_f_j << " -> " << new_f_j << " MHz"
+                    << " (HP core=" << i << " T=" << T << ")" << std::endl;
+          DtmDecision d;
+          d.action = DtmAction::DVFS;
+          d.core_id = j;
+          d.target_freq = new_f_j;
+          decisions.push_back(d);
+          throttled_neighbor = true;
+          break; // Only steal-throttle one neighbor to avoid over-throttling
+        }
+      }
 
-          bool j_is_lp = (weight_j <= avg_weight);
-          double T_j = m_perf->getTemperatureOfCore(j);
-
-          if (j_is_lp && T_j > 0.0 && T_j < m_t_warn) {
-            int cur_f_j = getCurrentFreq(j);
-            int new_f_j = std::max(cur_f_j - m_freq_step, m_min_freq);
-            if (new_f_j < cur_f_j) {
-              std::cout
-                  << "[DTM-Adaptive] Branch4 steal-throttle neighbor core " << j
-                  << " " << cur_f_j << " -> " << new_f_j << " MHz"
-                  << " (HP core=" << i << " T=" << T << ")" << std::endl;
-              DtmDecision d;
-              d.action = DtmAction::DVFS;
-              d.core_id = j;
-              d.target_freq = new_f_j;
-              decisions.push_back(d);
-              break; // Only steal-throttle one neighbor to avoid
-                     // over-throttling
-            }
-          }
+      // Fallback: if no suitable LP+cool neighbor exists, throttle this HP core
+      // locally (same behavior style as Branch 3 fallback).
+      if (!throttled_neighbor) {
+        int cur_f = getCurrentFreq(i);
+        int new_f = std::max(cur_f - m_freq_step, m_min_freq);
+        if (new_f < cur_f) {
+          std::cout << "[DTM-Adaptive] Branch4 fallback DVFS core " << i << " "
+                    << cur_f << " -> " << new_f << " MHz"
+                    << " T=" << T << std::endl;
+          DtmDecision d;
+          d.action = DtmAction::DVFS;
+          d.core_id = i;
+          d.target_freq = new_f;
+          decisions.push_back(d);
         }
       }
     }

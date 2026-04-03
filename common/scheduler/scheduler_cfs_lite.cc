@@ -928,7 +928,31 @@ void SchedulerCFSLite::handleDTM(SubsecondTime time)
             break;
          case DtmAction::YIELD:
             if (m_dtm_enable_yield)
-               threadYield((thread_id_t)d.thread_id);
+            {
+               thread_id_t ytid = (thread_id_t)d.thread_id;
+               threadYield(ytid);
+
+               // ── Anti-boomerang: boost vruntime to back of CFS queue ──────
+               // threadYield() does NOT penalise the yielded thread's vruntime.
+               // Since the thread barely ran, it has the lowest vruntime and CFS
+               // immediately re-selects it on the same (still-hot) core.
+               // Fix: set its vruntime to max(all runnable vruntimes) so it is
+               // last in line and CFS picks a different thread first.
+               if (ytid < (thread_id_t)m_thread_info.size())
+               {
+                  double max_vrt = m_thread_info[ytid].getVruntime();
+                  for (thread_id_t t = 0; t < (thread_id_t)m_thread_info.size(); ++t)
+                  {
+                     if (t < (thread_id_t)m_threads_runnable.size() && m_threads_runnable[t])
+                        max_vrt = std::max(max_vrt, m_thread_info[t].getVruntime());
+                  }
+                  // Add one extra "timeslice unit" so the thread sits strictly
+                  // behind all peers even if they share the same max vruntime.
+                  double penalty = (double)m_min_granularity.getNS() *
+                                   (1024.0 / std::max(1.0, m_thread_info[ytid].getWeight()));
+                  m_thread_info[ytid].setVruntime(max_vrt + penalty);
+               }
+            }
             break;
          case DtmAction::MIGRATE:
             if (m_dtm_enable_migration)

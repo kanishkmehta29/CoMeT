@@ -88,6 +88,16 @@ private:
     std::vector<double>   m_prev_mpki;
 
     /**
+     * Per-core yield cooldown counter.
+     * When a YIELD is emitted for core c, m_yield_cooldown[c] is set to
+     * YIELD_COOLDOWN_TICKS.  It is decremented each DTM tick and Branch 1
+     * is suppressed while non-zero, preventing the same core from being
+     * yielded on every consecutive tick (feedback loop).
+     */
+    static constexpr int YIELD_COOLDOWN_TICKS = 3;
+    std::vector<int> m_yield_cooldown;
+
+    /**
      * Per-core ring buffer of recent observed frequencies (MHZ).
      * Updated each DTM tick via recordFreq().
      * Used by isThrashing() to detect sustained frequency suppression.
@@ -107,7 +117,10 @@ private:
     };
     bool isThrashing(CoreStats coreStats) const;
     
-    std::vector<int> getVerticalNeighbors(int core_id) const;
+    std::vector<int> getAdjacentLpNeighbors(int core_id,
+                                             const std::vector<int>& core_thread_running,
+                                             const std::map<int,double>& thread_weights,
+                                             double avg_weight) const;
     int  getCoolestTargetCore(int source_core, const std::vector<int>& core_thread_running, const std::map<int,double>& thread_weights, double avg_weight) const;
     int  getCurrentFreq(int core_id) const;
     std::vector<int> getBanksForCore(int core_id) const;
