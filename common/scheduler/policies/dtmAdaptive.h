@@ -15,143 +15,141 @@
 #include "dtmpolicy.h"
 #include "performance_counters.h"
 #include <deque>
+#include <fstream>
 
 class DtmAdaptive : public DtmPolicy {
 public:
-    /**
-     * @param perf_counters  Live performance/temperature counters.
-     * @param num_cores      Total application cores in the system.
-     * @param cores_in_x     Core-grid X dimension (from memory/cores_in_x).
-     * @param cores_in_y     Core-grid Y dimension (from memory/cores_in_y).
-     * @param t_warn         Warning temperature threshold (°C).
-     * @param t_crit         Critical/emergency temperature threshold (°C).
-     * @param alpha_mem      Frequency scale factor for memory-bound cores (0–1).
-     * @param min_freq_mhz   Absolute minimum frequency the policy will request (MHz).
-     * @param freq_step_mhz  Single DVFS step size (MHz).
-     */
-    DtmAdaptive(const PerformanceCounters* perf_counters,
-                int   num_cores,
-                int   cores_in_x,
-                int   cores_in_y,
-                int   num_banks,
-                int   num_channels,
-                float t_warn,
-                float t_crit,
-                float alpha_mem,
-                int   min_freq_mhz,
-                int   freq_step_mhz,
-                float t_recover,
-                int   k_max,
-                float slack_scale,
-                float mem_intensity_threshold,
-                float mpki_threshold,
-                int   freq_history_len);
+  /**
+   * @param perf_counters  Live performance/temperature counters.
+   * @param num_cores      Total application cores in the system.
+   * @param cores_in_x     Core-grid X dimension (from memory/cores_in_x).
+   * @param cores_in_y     Core-grid Y dimension (from memory/cores_in_y).
+   * @param t_warn         Warning temperature threshold (°C).
+   * @param t_crit         Critical/emergency temperature threshold (°C).
+   * @param alpha_mem      Frequency scale factor for memory-bound cores (0–1).
+   * @param min_freq_mhz   Absolute minimum frequency the policy will request
+   * (MHz).
+   * @param freq_step_mhz  Single DVFS step size (MHz).
+   */
+  DtmAdaptive(const PerformanceCounters *perf_counters, int num_cores,
+              int cores_in_x, int cores_in_y, int num_banks, int num_channels,
+              float t_warn, float t_crit, float alpha_mem, int min_freq_mhz,
+              int freq_step_mhz, float t_recover, int k_max, float slack_scale,
+              float mem_intensity_threshold, float mpki_threshold,
+              int freq_history_len);
 
-    virtual ~DtmAdaptive() = default;
+  virtual ~DtmAdaptive() = default;
 
-    /**
-     * Compute a list of thermal management actions.
-     * Not const: updates m_bank_throttled state for DRAM recovery tracking.
-     */
-    virtual std::vector<DtmDecision> getDecisions(
-        const std::vector<int>&    core_thread_running,
-        const std::map<int,double>& thread_weights,
-        const std::vector<bool>&   core_rq_empty) override;
+  /**
+   * Compute a list of thermal management actions.
+   * Not const: updates m_bank_throttled state for DRAM recovery tracking.
+   */
+  virtual std::vector<DtmDecision>
+  getDecisions(const std::vector<int> &core_thread_running,
+               const std::map<int, double> &thread_weights,
+               const std::vector<bool> &core_rq_empty) override;
 
 private:
-    const PerformanceCounters* m_perf;
-    int   m_num_cores;
-    int   m_cores_in_x;
-    int   m_cores_in_y;
-    int   m_num_banks;                  ///< Total DRAM banks in the system.
-    int   m_num_channels;               ///< Number of memory channels.
-    int   m_banks_per_channel;          ///< num_banks / num_channels (floored).
-    int   m_cores_per_channel;          ///< num_cores / num_channels (floored).
-    float m_t_warn;
-    float m_t_crit;
-    float m_t_recover;                  ///< Temperature below which throttled banks are restored.
-    float m_alpha_mem;
-    int   m_min_freq;
-    int   m_freq_step;
-    int   m_k_max;                      ///< Max banks throttled per channel per call.
-    float m_slack_scale;                ///< Exponential curve steepness (°C).
-    float m_mem_intensity_threshold;    ///< Core-util threshold for memory-intensive classification.
-    float m_mpki_threshold;             ///< MPKI above which a core is considered memory-bound.
-    int   m_freq_history_len;           ///< Number of past epochs to retain for thrashing detection.
+  const PerformanceCounters *m_perf;
+  int m_num_cores;
+  int m_cores_in_x;
+  int m_cores_in_y;
+  int m_num_banks;         ///< Total DRAM banks in the system.
+  int m_num_channels;      ///< Number of memory channels.
+  int m_banks_per_channel; ///< num_banks / num_channels (floored).
+  int m_cores_per_channel; ///< num_cores / num_channels (floored).
+  float m_t_warn;
+  float m_t_crit;
+  float m_t_recover; ///< Temperature below which throttled banks are restored.
+  float m_alpha_mem;
+  int m_min_freq;
+  int m_freq_step;
+  int m_k_max;         ///< Max banks throttled per channel per call.
+  float m_slack_scale; ///< Exponential curve steepness (°C).
+  float m_mem_intensity_threshold; ///< Core-util threshold for memory-intensive
+                                   ///< classification.
+  float
+      m_mpki_threshold; ///< MPKI above which a core is considered memory-bound.
+  int m_freq_history_len; ///< Number of past epochs to retain for thrashing
+                          ///< detection.
 
-    /// Tracks which banks are currently in low-power/LTM mode.
-    std::vector<bool> m_bank_throttled;
+  /** Log file — all [DTM-Adaptive] messages go here instead of stdout. */
+  mutable std::ofstream m_log;
 
-    /// Delta MPKI state trackers per core
-    std::vector<uint64_t> m_prev_instr;
-    std::vector<uint64_t> m_prev_miss;
-    std::vector<double>   m_prev_mpki;
+  /// Tracks which banks are currently in low-power/LTM mode.
+  std::vector<bool> m_bank_throttled;
 
-    /**
-     * Per-core yield cooldown counter.
-     * When a YIELD is emitted for core c, m_yield_cooldown[c] is set to
-     * YIELD_COOLDOWN_TICKS.  It is decremented each DTM tick and Branch 1
-     * is suppressed while non-zero, preventing the same core from being
-     * yielded on every consecutive tick (feedback loop).
-     */
-    static constexpr int YIELD_COOLDOWN_TICKS = 3;
-    std::vector<int> m_yield_cooldown;
+  /// Delta MPKI state trackers per core
+  std::vector<uint64_t> m_prev_instr;
+  std::vector<uint64_t> m_prev_miss;
+  std::vector<double> m_prev_mpki;
 
-    /**
-     * Per-core ring buffer of recent observed frequencies (MHZ).
-     * Updated each DTM tick via recordFreq().
-     * Used by isThrashing() to detect sustained frequency suppression.
-     */
-    std::vector<std::deque<int>> m_freq_history;
+  /**
+   * Tracks if a core was recently yielded.
+   * Set to true when Branch 1 yields, and reset to false when the core
+   * cools below t_warn. This prevents continuous YIELD spam and allows
+   * escalating to DVFS if the core remains hot despite the yield.
+   */
+  std::vector<bool> m_recently_yielded;
 
-    /// Append current freq for core to its history ring-buffer.
-    void recordFreq(int core_id);
+  /**
+   * Per-core ring buffer of recent observed frequencies (MHZ).
+   * Updated each DTM tick via recordFreq().
+   * Used by isThrashing() to detect sustained frequency suppression.
+   */
+  std::vector<std::deque<int>> m_freq_history;
 
-    // ── Core-side helpers ────────────────────────────────────────────────────
-    bool isMemoryBound(int core_id);
-    
-    struct CoreStats {
-        float ipc;
-        float stall_fraction;
-        float llc_mpki;
-    };
-    bool isThrashing(CoreStats coreStats) const;
-    
-    std::vector<int> getAdjacentLpNeighbors(int core_id,
-                                             const std::vector<int>& core_thread_running,
-                                             const std::map<int,double>& thread_weights,
-                                             double avg_weight) const;
-    int  getCoolestTargetCore(int source_core, const std::vector<int>& core_thread_running, const std::map<int,double>& thread_weights, double avg_weight) const;
-    int  getCurrentFreq(int core_id) const;
-    std::vector<int> getBanksForCore(int core_id) const;
+  /// Append current freq for core to its history ring-buffer.
+  void recordFreq(int core_id);
 
-    // ── Memory-channel helpers (Phase 2) ─────────────────────────────────────
+  // ── Core-side helpers ────────────────────────────────────────────────────
+  bool isMemoryBound(int core_id);
 
-    /// Banks belonging to channel ch (contiguous block).
-    std::vector<int> banksForChannel(int ch) const;
+  struct CoreStats {
+    float ipc;
+    float stall_fraction;
+    float llc_mpki;
+  };
+  bool isThrashing(CoreStats coreStats) const;
 
-    /// Cores associated with channel ch (strided: core c → ch = c % num_channels).
-    std::vector<int> coresForChannel(int ch) const;
+  std::vector<int> getAdjacentLpNeighbors(
+      int core_id, const std::vector<int> &core_thread_running,
+      const std::map<int, double> &thread_weights, double avg_weight) const;
+  int getCoolestTargetCore(int source_core,
+                           const std::vector<int> &core_thread_running,
+                           const std::map<int, double> &thread_weights,
+                           double avg_weight) const;
+  int getCurrentFreq(int core_id) const;
+  std::vector<int> getBanksForCore(int core_id) const;
 
-    /// Average compute utilisation of cores in channel ch.
-    double channelUtilization(int ch) const;
+  // ── Memory-channel helpers (Phase 2) ─────────────────────────────────────
 
-    /**
-     * Throttle magnitude for channel at temperature T.
-     * k = round(k_max × exp(−(T_crit − T) / slack_scale))
-     * Clamped to [0, k_max].
-     */
-    int throttleMagnitude(double T) const;
+  /// Banks belonging to channel ch (contiguous block).
+  std::vector<int> banksForChannel(int ch) const;
 
-    /**
-     * Score a bank for LTM selection.
-     * score(b) = (N − C) × log(MAC + 1)
-     *   N   = m_t_crit      (thermal capacity limit)
-     *   C   = T_bank        (current bank temperature)
-     *   MAC = IPS_core      (memory access count proxy)
-     * Lower score → throttled first (hot bank, low-utility core).
-     */
-    double bankScore(int bank_id) const;
+  /// Cores associated with channel ch (strided: core c → ch = c %
+  /// num_channels).
+  std::vector<int> coresForChannel(int ch) const;
+
+  /// Average compute utilisation of cores in channel ch.
+  double channelUtilization(int ch) const;
+
+  /**
+   * Throttle magnitude for channel at temperature T.
+   * k = round(k_max × exp(−(T_crit − T) / slack_scale))
+   * Clamped to [0, k_max].
+   */
+  int throttleMagnitude(double T) const;
+
+  /**
+   * Score a bank for LTM selection.
+   * score(b) = (N − C) × log(MAC + 1)
+   *   N   = m_t_crit      (thermal capacity limit)
+   *   C   = T_bank        (current bank temperature)
+   *   MAC = IPS_core      (memory access count proxy)
+   * Lower score → throttled first (hot bank, low-utility core).
+   */
+  double bankScore(int bank_id) const;
 };
 
 #endif // __DTM_ADAPTIVE_H
