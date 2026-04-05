@@ -29,11 +29,13 @@ public:
    * @param alpha_mem      Frequency scale factor for memory-bound cores (0–1).
    * @param min_freq_mhz   Absolute minimum frequency the policy will request
    * (MHz).
+   * @param max_freq_mhz   Absolute maximum baseline frequency for recovery (MHz).
    * @param freq_step_mhz  Single DVFS step size (MHz).
    */
   DtmAdaptive(const PerformanceCounters *perf_counters, int num_cores,
               int cores_in_x, int cores_in_y, int num_banks, int num_channels,
               float t_warn, float t_crit, float alpha_mem, int min_freq_mhz,
+              int max_freq_mhz,
               int freq_step_mhz, float t_recover, int k_max, float slack_scale,
               float mem_intensity_threshold, float mpki_threshold,
               int freq_history_len);
@@ -63,6 +65,7 @@ private:
   float m_t_recover; ///< Temperature below which throttled banks are restored.
   float m_alpha_mem;
   int m_min_freq;
+  int m_max_freq;
   int m_freq_step;
   int m_k_max;         ///< Max banks throttled per channel per call.
   float m_slack_scale; ///< Exponential curve steepness (°C).
@@ -75,6 +78,7 @@ private:
 
   /** Log file — all [DTM-Adaptive] messages go here instead of stdout. */
   mutable std::ofstream m_log;
+  mutable std::ofstream m_epoch_log; ///< Separate file for per-core per-epoch weight diagnostics.
 
   /// Tracks which banks are currently in low-power/LTM mode.
   std::vector<bool> m_bank_throttled;
@@ -85,12 +89,13 @@ private:
   std::vector<double> m_prev_mpki;
 
   /**
-   * Tracks if a core was recently yielded.
-   * Set to true when Branch 1 yields, and reset to false when the core
-   * cools below t_warn. This prevents continuous YIELD spam and allows
-   * escalating to DVFS if the core remains hot despite the yield.
+   * Per-core record of the thread_id most recently yielded by Branch 1.
+   * -1 means no pending yield on this core.
+   * Reset to -1 when the core cools below t_warn.
+   * Keyed by (core, thread) so a different thread landing on the same
+   * hot core is not incorrectly skipped to DVFS escalation.
    */
-  std::vector<bool> m_recently_yielded;
+  std::vector<int> m_recently_yielded_tid;
 
   /**
    * Per-core ring buffer of recent observed frequencies (MHZ).
@@ -110,7 +115,7 @@ private:
     float stall_fraction;
     float llc_mpki;
   };
-  bool isThrashing(CoreStats coreStats) const;
+  bool isThrashing(int core_id, CoreStats coreStats) const;
 
   std::vector<int> getAdjacentLpNeighbors(
       int core_id, const std::vector<int> &core_thread_running,
