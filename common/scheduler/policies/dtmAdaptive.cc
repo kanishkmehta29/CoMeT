@@ -64,16 +64,18 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters *perf_counters,
 
   m_log.open("dtm_adaptive.log");
   if (!m_log.is_open()) {
-    std::cerr << "[DTM-Adaptive] WARNING: Failed to open dtm_adaptive.log!" << std::endl;
+    std::cerr << "[DTM-Adaptive] WARNING: Failed to open dtm_adaptive.log!"
+              << std::endl;
   }
 
-  if (m_log.is_open()) m_log << "[DTM-Adaptive] initialized"
-            << " t_warn=" << m_t_warn << " t_crit=" << m_t_crit
-            << " t_recover=" << m_t_recover << " alpha_mem=" << m_alpha_mem
-            << " min_freq=" << m_min_freq << " MHz"
-            << " num_banks=" << m_num_banks << " channels=" << m_num_channels
-            << " k_max=" << m_k_max << " mpki_threshold=" << m_mpki_threshold
-            << " freq_history_len=" << m_freq_history_len << std::endl;
+  if (m_log.is_open())
+    m_log << "[DTM-Adaptive] initialized"
+          << " t_warn=" << m_t_warn << " t_crit=" << m_t_crit
+          << " t_recover=" << m_t_recover << " alpha_mem=" << m_alpha_mem
+          << " min_freq=" << m_min_freq << " MHz"
+          << " num_banks=" << m_num_banks << " channels=" << m_num_channels
+          << " k_max=" << m_k_max << " mpki_threshold=" << m_mpki_threshold
+          << " freq_history_len=" << m_freq_history_len << std::endl;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -152,7 +154,8 @@ bool DtmAdaptive::isMemoryBound(int core_id) {
   else
     nature = "Memory-bound";
 
-  // if (m_log.is_open()) m_log << "[DTM-Adaptive] memBound-Check core " << core_id
+  // if (m_log.is_open()) m_log << "[DTM-Adaptive] memBound-Check core " <<
+  // core_id
   //           << " d_instr=" << d_instr
   //           << " d_miss=" << d_miss
   //           << " MPKI=" << mpki
@@ -207,11 +210,12 @@ bool DtmAdaptive::isThrashing(CoreStats coreStats) const {
   bool thrash = (coreStats.ipc < 0.5f && coreStats.stall_fraction > 0.6f);
 
   if (thrash) {
-    if (m_log.is_open()) m_log << "[DTM-Adaptive] thrashing-check"
-              << " ipc=" << coreStats.ipc
-              << " stall_frac=" << coreStats.stall_fraction
-              << " llc_mpki=" << coreStats.llc_mpki << " -> THRASHING"
-              << std::endl;
+    if (m_log.is_open())
+      m_log << "[DTM-Adaptive] thrashing-check"
+            << " ipc=" << coreStats.ipc
+            << " stall_frac=" << coreStats.stall_fraction
+            << " llc_mpki=" << coreStats.llc_mpki << " -> THRASHING"
+            << std::endl;
   }
 
   return thrash;
@@ -424,22 +428,28 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     return decisions;
 
   // ── Calculate relative priority baseline ──────────────────────────────────
-  // To avoid strict reliance on absolute nice values, we dynamically
-  // determine the average weight of all currently scheduled threads. Threads
-  // with a weight strictly higher than the average are classified as HP.
-  double total_weight = 0.0;
-  int weight_count = 0;
-  for (int i = 0; i < m_num_cores; ++i) {
-    int tid = core_thread_running[i];
-    if (tid != -1) {
-      auto it = thread_weights.find(tid);
-      if (it != thread_weights.end()) {
-        total_weight += it->second;
-        weight_count++;
-      }
+  // Use median of ALL threads (both running and queued) to avoid skewed
+  // averages
+  std::vector<double> w;
+  for (const auto &w_pair : thread_weights) {
+    if (w_pair.second > 0.0) {
+      w.push_back(w_pair.second);
     }
   }
-  double avg_weight = (weight_count > 0) ? total_weight / weight_count : 0.0;
+
+  double avg_weight =
+      0.0; // We keep the variable name avg_weight but it stores the median
+  if (!w.empty()) {
+    std::sort(w.begin(), w.end());
+    avg_weight = w[w.size() / 2];
+  }
+
+  // if (m_log.is_open()) {
+  //   m_log << "[DTM-Adaptive] tick thermal weights: ";
+  //   for (double weight_val : w)
+  //     m_log << weight_val << " ";
+  //   m_log << " | median=" << avg_weight << std::endl;
+  // }
 
   for (int i = 0; i < m_num_cores; ++i) {
     // Update frequency history for this core at the start of every tick.
@@ -456,8 +466,9 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
       m_recently_yielded[i] = false; // Core has cooled, resetting yield state
       for (int b : getBanksForCore(i)) {
         if (m_bank_throttled[b]) {
-          if (m_log.is_open()) m_log << "[DTM-Adaptive] bank recovery core " << i << " bank "
-                    << b << " -> normal  T=" << T << std::endl;
+          if (m_log.is_open())
+            m_log << "[DTM-Adaptive] bank recovery core " << i << " bank " << b
+                  << " -> normal  T=" << T << std::endl;
           DtmDecision d;
           d.action = DtmAction::DRAM_MODE;
           d.bank_id = b;
@@ -471,8 +482,9 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
 
     if (T > m_t_crit) {
       // Emergency: slam frequency to hardware minimum
-      if (m_log.is_open()) m_log << "[DTM-Adaptive] EMERGENCY throttle core " << i << " T=" << T
-                << " > T_crit=" << m_t_crit << std::endl;
+      if (m_log.is_open())
+        m_log << "[DTM-Adaptive] EMERGENCY throttle core " << i << " T=" << T
+              << " > T_crit=" << m_t_crit << std::endl;
       DtmDecision d;
       d.action = DtmAction::DVFS;
       d.core_id = i;
@@ -498,6 +510,11 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     bool is_hp = (weight >= hp_threshold);
     bool is_lp = (weight <= lp_threshold);
 
+    // if (m_log.is_open() && is_hp) {
+    //   m_log << "[DTM-Adaptive] HP core " << i << " tid=" << thread_id
+    //         << " weight=" << weight << std::endl;
+    // }
+
     bool rq_empty = core_rq_empty[i];
 
     // ── Memory-bound path ─────────────────────────────────────────────────
@@ -509,8 +526,9 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     if (isMemoryBound(i)) {
       for (int b : getBanksForCore(i)) {
         if (!m_bank_throttled[b]) {
-          if (m_log.is_open()) m_log << "[DTM-Adaptive] mem-throttle core " << i << " bank " << b
-                    << " -> lowpower  T=" << T << std::endl;
+          if (m_log.is_open())
+            m_log << "[DTM-Adaptive] mem-throttle core " << i << " bank " << b
+                  << " -> lowpower  T=" << T << std::endl;
           DtmDecision d;
           d.action = DtmAction::DRAM_MODE;
           d.bank_id = b;
@@ -535,11 +553,12 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
       // Branch 1: Low-priority thread on hot core, alternatives waiting.
       if (!m_recently_yielded[i]) {
         // First attempt to mitigate: YIELD LP thread
-        if (m_log.is_open()) m_log << "[DTM-Adaptive] Branch1 yield core " << i
-                  << " tid=" << thread_id << " weight=" << weight
-                  << " avg_weight=" << avg_weight << " T=" << T << std::endl;
+        if (m_log.is_open())
+          m_log << "[DTM-Adaptive] Branch1 yield core " << i
+                << " tid=" << thread_id << " weight=" << weight
+                << " avg_weight=" << avg_weight << " T=" << T << std::endl;
         DtmDecision d;
-        d.action    = DtmAction::YIELD;
+        d.action = DtmAction::YIELD;
         d.thread_id = thread_id;
         decisions.push_back(d);
         m_recently_yielded[i] = true;
@@ -549,9 +568,10 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
         int cur_f = getCurrentFreq(i);
         int new_f = std::max(cur_f - m_freq_step, m_min_freq);
         if (new_f < cur_f) {
-          if (m_log.is_open()) m_log << "[DTM-Adaptive] Branch1 ESCALATE DVFS core " << i << " " << cur_f
-                    << " -> " << new_f << " MHz (yield ineffective)"
-                    << " T=" << T << std::endl;
+          if (m_log.is_open())
+            m_log << "[DTM-Adaptive] Branch1 ESCALATE DVFS core " << i << " "
+                  << cur_f << " -> " << new_f << " MHz (yield ineffective)"
+                  << " T=" << T << std::endl;
           DtmDecision d;
           d.action = DtmAction::DVFS;
           d.core_id = i;
@@ -564,9 +584,10 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
       int cur_f = getCurrentFreq(i);
       int new_f = std::max(cur_f - m_freq_step, m_min_freq);
       if (new_f < cur_f) {
-        if (m_log.is_open()) m_log << "[DTM-Adaptive] Branch2 DVFS core " << i << " " << cur_f
-                  << " -> " << new_f << " MHz"
-                  << " T=" << T << std::endl;
+        if (m_log.is_open())
+          m_log << "[DTM-Adaptive] Branch2 DVFS core " << i << " " << cur_f
+                << " -> " << new_f << " MHz"
+                << " T=" << T << std::endl;
         DtmDecision d;
         d.action = DtmAction::DVFS;
         d.core_id = i;
@@ -578,9 +599,10 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
       int dst = getCoolestTargetCore(i, core_thread_running, thread_weights,
                                      avg_weight);
       if (dst != -1 && dst != i) {
-        if (m_log.is_open()) m_log << "[DTM-Adaptive] Branch3 migrate HP tid=" << thread_id
-                  << " core " << i << " -> " << dst << " T_src=" << T
-                  << std::endl;
+        if (m_log.is_open())
+          m_log << "[DTM-Adaptive] Branch3 migrate HP tid=" << thread_id
+                << " core " << i << " -> " << dst << " T_src=" << T
+                << std::endl;
         DtmDecision d;
         d.action = DtmAction::MIGRATE;
         d.thread_id = thread_id;
@@ -591,9 +613,10 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
         int cur_f = getCurrentFreq(i);
         int new_f = std::max(cur_f - m_freq_step, m_min_freq);
         if (new_f < cur_f) {
-          if (m_log.is_open()) m_log << "[DTM-Adaptive] Branch3 fallback DVFS core " << i << " "
-                    << cur_f << " -> " << new_f << " MHz"
-                    << " T=" << T << std::endl;
+          if (m_log.is_open())
+            m_log << "[DTM-Adaptive] Branch3 fallback DVFS core " << i << " "
+                  << cur_f << " -> " << new_f << " MHz"
+                  << " T=" << T << std::endl;
           DtmDecision d;
           d.action = DtmAction::DVFS;
           d.core_id = i;
@@ -617,9 +640,10 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
         int cur_f_j = getCurrentFreq(j);
         int new_f_j = std::max(cur_f_j - m_freq_step, m_min_freq);
         if (new_f_j < cur_f_j) {
-          if (m_log.is_open()) m_log << "[DTM-Adaptive] Branch4 steal-throttle neighbor core "
-                    << j << " " << cur_f_j << " -> " << new_f_j << " MHz"
-                    << " (HP core=" << i << " T=" << T << ")" << std::endl;
+          if (m_log.is_open())
+            m_log << "[DTM-Adaptive] Branch4 steal-throttle neighbor core " << j
+                  << " " << cur_f_j << " -> " << new_f_j << " MHz"
+                  << " (HP core=" << i << " T=" << T << ")" << std::endl;
           DtmDecision d;
           d.action = DtmAction::DVFS;
           d.core_id = j;
@@ -636,9 +660,10 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
         int cur_f = getCurrentFreq(i);
         int new_f = std::max(cur_f - m_freq_step, m_min_freq);
         if (new_f < cur_f) {
-          if (m_log.is_open()) m_log << "[DTM-Adaptive] Branch4 fallback DVFS core " << i << " "
-                    << cur_f << " -> " << new_f << " MHz"
-                    << " T=" << T << std::endl;
+          if (m_log.is_open())
+            m_log << "[DTM-Adaptive] Branch4 fallback DVFS core " << i << " "
+                  << cur_f << " -> " << new_f << " MHz"
+                  << " T=" << T << std::endl;
           DtmDecision d;
           d.action = DtmAction::DVFS;
           d.core_id = i;
@@ -669,8 +694,9 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     if (T_ch < m_t_recover) {
       for (int b : ch_banks) {
         if (m_bank_throttled[b]) {
-          if (m_log.is_open()) m_log << "[DTM-Adaptive] MemDTM ch" << ch << " bank " << b
-                    << " restored  T=" << T_ch << std::endl;
+          if (m_log.is_open())
+            m_log << "[DTM-Adaptive] MemDTM ch" << ch << " bank " << b
+                  << " restored  T=" << T_ch << std::endl;
           DtmDecision d;
           d.action = DtmAction::DRAM_MODE;
           d.bank_id = b;
@@ -687,8 +713,9 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
 
     if (T_ch > m_t_crit) {
       // Emergency: all banks in this channel to LPM.
-      if (m_log.is_open()) m_log << "[DTM-Adaptive] MemDTM EMERGENCY ch" << ch << "  T=" << T_ch
-                << std::endl;
+      if (m_log.is_open())
+        m_log << "[DTM-Adaptive] MemDTM EMERGENCY ch" << ch << "  T=" << T_ch
+              << std::endl;
       for (int b : ch_banks) {
         if (!m_bank_throttled[b]) {
           DtmDecision d;
@@ -715,9 +742,10 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
         int cur_f = getCurrentFreq(c);
         int new_f = std::max((int)(cur_f * 0.9), m_min_freq);
         if (new_f < cur_f) {
-          if (m_log.is_open()) m_log << "[DTM-Adaptive] MemDTM ch" << ch << " coupling: DVFS c"
-                    << c << " " << cur_f << "->" << new_f << " MHz"
-                    << "  T=" << T_ch << std::endl;
+          if (m_log.is_open())
+            m_log << "[DTM-Adaptive] MemDTM ch" << ch << " coupling: DVFS c"
+                  << c << " " << cur_f << "->" << new_f << " MHz"
+                  << "  T=" << T_ch << std::endl;
           DtmDecision d;
           d.action = DtmAction::DVFS;
           d.core_id = c;
@@ -730,8 +758,9 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
 
     // Step 3: Fine-grained bank LTM selection.
     int k = throttleMagnitude(T_ch);
-    if (m_log.is_open()) m_log << "[DTM-Adaptive] MemDTM ch" << ch << " mem-intensive T=" << T_ch
-              << " util=" << util << " k=" << k << std::endl;
+    if (m_log.is_open())
+      m_log << "[DTM-Adaptive] MemDTM ch" << ch << " mem-intensive T=" << T_ch
+            << " util=" << util << " k=" << k << std::endl;
     if (k == 0)
       continue;
 
@@ -751,9 +780,10 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
       bool ltm = (idx < k);
       int mode = ltm ? 0 : 1; // LOW_POWER=0, NORMAL_POWER=1
       if (ltm != m_bank_throttled[b]) {
-        if (m_log.is_open()) m_log << "[DTM-Adaptive] MemDTM ch" << ch << " bank " << b
-                  << (ltm ? " -> LTM" : " <- restored")
-                  << "  score=" << scored[idx].sc << std::endl;
+        if (m_log.is_open())
+          m_log << "[DTM-Adaptive] MemDTM ch" << ch << " bank " << b
+                << (ltm ? " -> LTM" : " <- restored")
+                << "  score=" << scored[idx].sc << std::endl;
         DtmDecision d;
         d.action = DtmAction::DRAM_MODE;
         d.bank_id = b;
