@@ -107,7 +107,7 @@ class SchedulerCFSLite : public SchedulerDynamic
       
       // Stats wrappers
       std::vector<UInt64> m_stat_running_thread;
-      std::vector<double> m_stat_running_weight;
+      std::vector<UInt64> m_stat_running_weight;
       std::vector<UInt64> m_stat_dtm_action;
       SubsecondTime m_last_lb;                   ///< Timestamp of last load-balance pass  [from file 2]
 

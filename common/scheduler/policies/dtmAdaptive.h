@@ -26,7 +26,6 @@ public:
    * @param cores_in_y     Core-grid Y dimension (from memory/cores_in_y).
    * @param t_warn         Warning temperature threshold (°C).
    * @param t_crit         Critical/emergency temperature threshold (°C).
-   * @param alpha_mem      Frequency scale factor for memory-bound cores (0–1).
    * @param min_freq_mhz   Absolute minimum frequency the policy will request
    * (MHz).
    * @param max_freq_mhz   Absolute maximum baseline frequency for recovery (MHz).
@@ -34,7 +33,7 @@ public:
    */
   DtmAdaptive(const PerformanceCounters *perf_counters, int num_cores,
               int cores_in_x, int cores_in_y, int num_banks, int num_channels,
-              float t_warn, float t_crit, float alpha_mem, int min_freq_mhz,
+              float t_warn, float t_crit, int min_freq_mhz,
               int max_freq_mhz,
               int freq_step_mhz, int k_max, float slack_scale,
               float mem_intensity_threshold, float mpki_threshold,
@@ -62,7 +61,6 @@ private:
   int m_cores_per_channel; ///< num_cores / num_channels (floored).
   float m_t_warn;
   float m_t_crit; ///< Temperature (°C) that triggers emergency max-throttle.
-  float m_alpha_mem;
   int m_min_freq;
   int m_max_freq;
   int m_freq_step;

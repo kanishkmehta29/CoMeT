@@ -178,7 +178,7 @@ SchedulerCFSLite::SchedulerCFSLite(ThreadManager *thread_manager)
   // Register per-core telemetry stats for Python observability and compute_metrics.py
   int num_cores = Sim()->getConfig()->getApplicationCores();
   m_stat_running_thread.resize(num_cores, (UInt64)-1);
-  m_stat_running_weight.resize(num_cores, 0.0);
+  m_stat_running_weight.resize(num_cores, 0);
   m_stat_dtm_action.resize(num_cores, 0);
 
   for (int core = 0; core < num_cores; ++core) {
@@ -1363,10 +1363,10 @@ void SchedulerCFSLite::periodic(SubsecondTime time) {
     thread_id_t tid = m_core_thread_running[core_id];
     if (tid == INVALID_THREAD_ID) {
       m_stat_running_thread[core_id] = (UInt64)-1;
-      m_stat_running_weight[core_id] = 0.0;
+      m_stat_running_weight[core_id] = 0;
     } else {
       m_stat_running_thread[core_id] = (UInt64)tid;
-      m_stat_running_weight[core_id] = m_thread_info[tid].getWeight();
+      m_stat_running_weight[core_id] = (UInt64)std::llround(m_thread_info[tid].getWeight());
     }
   }
 
