@@ -41,9 +41,8 @@
 DtmAdaptive::DtmAdaptive(const PerformanceCounters *perf_counters,
                          int num_cores, int cores_in_x, int cores_in_y,
                          int num_banks, int num_channels, float t_warn,
-                         float t_crit, float alpha_mem, int min_freq_mhz,
-                         int max_freq_mhz, int freq_step_mhz, float t_recover,
-                         int k_max, float slack_scale,
+                         float t_crit, int min_freq_mhz, int max_freq_mhz,
+                         int freq_step_mhz, int k_max, float slack_scale,
                          float mem_intensity_threshold, float mpki_threshold,
                          int freq_history_len)
     : m_perf(perf_counters), m_num_cores(num_cores), m_cores_in_x(cores_in_x),
@@ -51,8 +50,7 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters *perf_counters,
       m_num_channels(std::max(1, num_channels)),
       m_banks_per_channel(std::max(1, num_banks / std::max(1, num_channels))),
       m_cores_per_channel(std::max(1, num_cores / std::max(1, num_channels))),
-      m_t_warn(t_warn), m_t_crit(t_crit), m_t_recover(t_recover),
-      m_alpha_mem(alpha_mem), m_min_freq(min_freq_mhz),
+      m_t_warn(t_warn), m_t_crit(t_crit), m_min_freq(min_freq_mhz),
       m_max_freq(max_freq_mhz), m_freq_step(freq_step_mhz), m_k_max(k_max),
       m_slack_scale(slack_scale),
       m_mem_intensity_threshold(mem_intensity_threshold),
@@ -79,7 +77,6 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters *perf_counters,
   if (m_log.is_open())
     m_log << "[DTM-Adaptive] initialized"
           << " t_warn=" << m_t_warn << " t_crit=" << m_t_crit
-          << " t_recover=" << m_t_recover << " alpha_mem=" << m_alpha_mem
           << " min_freq=" << m_min_freq << " MHz"
           << " num_banks=" << m_num_banks << " channels=" << m_num_channels
           << " k_max=" << m_k_max << " mpki_threshold=" << m_mpki_threshold
@@ -238,24 +235,9 @@ bool DtmAdaptive::isThrashing(int core_id, CoreStats coreStats) const {
   first_half /= (double)half;
   second_half /= (double)half; // same denominator — symmetric averages
 
-  // Guard: if a recovery event occurred mid-window (freq rose back up at any
-  // point), the total-drop check is unreliable.  Instead, verify that the
-  // window contains no upward step larger than one DVFS step, ensuring we are
-  // looking at a monotone (or near-monotone) decline rather than a noisy
-  // window that happens to end lower than it started.
-  bool monotone_decline = true;
-  for (int hi = 1; hi < (int)hist.size(); ++hi) {
-    if (hist[hi] > hist[hi - 1]) {
-      monotone_decline = false;
-      break;
-    }
-  }
-
-  // Total drop from oldest to newest must be at least one DVFS step.
-  bool sufficient_drop = ((int)hist.front() - (int)hist.back()) >= m_freq_step;
-
-  bool freq_declining =
-      (second_half < first_half) && sufficient_drop && monotone_decline;
+  // Softer rule: average of the second half must be lower than the first half
+  // by at least one DVFS step, regardless of individual non-monotone points.
+  bool freq_declining = (first_half - second_half) >= m_freq_step;
 
   if (freq_declining && m_log.is_open())
     m_log << "[DTM-Adaptive] thrashing-check core=" << core_id
@@ -264,7 +246,7 @@ bool DtmAdaptive::isThrashing(int core_id, CoreStats coreStats) const {
           << " freq_old=" << hist.front() << " freq_now=" << hist.back()
           << " first_half_avg=" << first_half
           << " second_half_avg=" << second_half
-          << " monotone=" << monotone_decline << " -> THRASHING" << std::endl;
+          << " -> THRASHING" << std::endl;
 
   return freq_declining;
 }
@@ -482,6 +464,14 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
   if (!m_perf)
     return decisions;
 
+  // ── Cache Memory-Bound Status ───────────────────────────────────────────
+  // Cache to avoid side-effects (updating instr/miss counters) from multiple
+  // calls per tick in both Phase 1 and Phase 2.
+  std::vector<bool> core_is_mem_bound(m_num_cores, false);
+  for (int i = 0; i < m_num_cores; ++i) {
+    core_is_mem_bound[i] = isMemoryBound(i);
+  }
+
   // ── Calculate relative priority baseline ──────────────────────────────────
   // Use median of ALL threads (both running and queued) to avoid skewed
   // averages
@@ -534,6 +524,7 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     if (T < m_t_warn) {
       m_recently_yielded_tid[i] =
           -1; // Core has cooled — clear yielded-thread record
+
       for (int b : getBanksForCore(i)) {
         if (m_bank_throttled[b]) {
           if (m_log.is_open())
@@ -542,8 +533,7 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
           DtmDecision d;
           d.action = DtmAction::DRAM_MODE;
           d.bank_id = b;
-          d.bank_mode = 1; // NORMAL_POWER (canonical: 0=LOW_POWER/high-latency,
-                           // 1=NORMAL_POWER)
+          d.bank_mode = 1; // NORMAL_POWER
           decisions.push_back(d);
           m_bank_throttled[b] = false;
         }
@@ -591,11 +581,9 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     if (it != thread_weights.end())
       weight = it->second;
 
-    // Hysteresis for priority classification to prevent limit-cycle flipping
     double hp_threshold = avg_weight;
-    double lp_threshold = avg_weight;
     bool is_hp = (weight >= hp_threshold);
-    bool is_lp = (weight < lp_threshold);
+    bool is_lp = (weight < hp_threshold);
 
     // if (m_log.is_open() && is_hp) {
     //   m_log << "[DTM-Adaptive] HP core " << i << " tid=" << thread_id
@@ -618,7 +606,7 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
         (current_cpi > 1.0) ? (float)((current_cpi - 1.0) / current_cpi) : 0.0f;
     stats.llc_mpki = (float)m_prev_mpki[i];
 
-    if (isMemoryBound(i)) {
+    if (core_is_mem_bound[i]) {
       for (int b : getBanksForCore(i)) {
         if (!m_bank_throttled[b]) {
           if (m_log.is_open())
@@ -627,8 +615,7 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
           DtmDecision d;
           d.action = DtmAction::DRAM_MODE;
           d.bank_id = b;
-          d.bank_mode = 0; // LOW_POWER (canonical: 0=LOW_POWER/high-latency,
-                           // 1=NORMAL_POWER)
+          d.bank_mode = 0;
           decisions.push_back(d);
           m_bank_throttled[b] = true;
         }
@@ -781,8 +768,8 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     if (T_ch <= 0.0)
       continue;
 
-    // Recovery: channel has cooled below t_recover — restore throttled banks.
-    if (T_ch < m_t_recover) {
+    // Recovery: channel has cooled below t_warn — restore throttled banks.
+    if (T_ch < m_t_warn) {
       for (int b : ch_banks) {
         if (m_bank_throttled[b]) {
           if (m_log.is_open())
@@ -823,8 +810,15 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     // T_warn <= T_ch <= T_crit
 
     // Step 2: Workload intensity analysis.
-    double util = channelUtilization(ch);
-    bool mem_intensive = (util < m_mem_intensity_threshold);
+    std::vector<int> mapped_cores = coresForChannel(ch);
+    int mem_bound_count = 0;
+    for (int c : mapped_cores) {
+      if (core_is_mem_bound[c])
+        mem_bound_count++;
+    }
+    // Majority decision: true if strictly more than half the cores are memory
+    // bound.
+    bool mem_intensive = mem_bound_count > (int)(mapped_cores.size() / 2);
 
     if (!mem_intensive) {
       // Heat is from cores via vertical coupling, not memory traffic.
@@ -851,7 +845,8 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     int k = throttleMagnitude(T_ch);
     if (m_log.is_open())
       m_log << "[DTM-Adaptive] MemDTM ch" << ch << " mem-intensive T=" << T_ch
-            << " util=" << util << " k=" << k << std::endl;
+            << " mb_cores=" << mem_bound_count << "/" << mapped_cores.size()
+            << " k=" << k << std::endl;
     if (k == 0)
       continue;
 

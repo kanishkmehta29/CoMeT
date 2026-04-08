@@ -7,6 +7,7 @@
 #include "policies/drampolicy.h"
 #include "policies/coreMemDTM.h"
 #include "policies/dtmpolicy.h"
+#include "stats.h"
 
 #include <deque>
 
@@ -103,6 +104,11 @@ class SchedulerCFSLite : public SchedulerDynamic
       std::vector<double> m_slice_left;          ///< Remaining time-slice in cycles  [from file 2]
       std::vector<std::deque<thread_id_t> > m_core_runqueues;
       std::vector<core_id_t> m_thread_home_core;
+      
+      // Stats wrappers
+      std::vector<UInt64> m_stat_running_thread;
+      std::vector<double> m_stat_running_weight;
+      std::vector<UInt64> m_stat_dtm_action;
       SubsecondTime m_last_lb;                   ///< Timestamp of last load-balance pass  [from file 2]
 
       // Debug logging state

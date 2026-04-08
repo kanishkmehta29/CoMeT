@@ -175,6 +175,18 @@ SchedulerCFSLite::SchedulerCFSLite(ThreadManager *thread_manager)
   initDramPolicy(Sim()->getCfg()->getString("scheduler/cfs_lite/dram/dtm"));
   initDtmPolicy(Sim()->getCfg()->getString("scheduler/cfs_lite/dtm/logic"));
 
+  // Register per-core telemetry stats for Python observability and compute_metrics.py
+  int num_cores = Sim()->getConfig()->getApplicationCores();
+  m_stat_running_thread.resize(num_cores, (UInt64)-1);
+  m_stat_running_weight.resize(num_cores, 0.0);
+  m_stat_dtm_action.resize(num_cores, 0);
+
+  for (int core = 0; core < num_cores; ++core) {
+    registerStatsMetric("scheduler", core, "running_thread", &m_stat_running_thread[core]);
+    registerStatsMetric("scheduler", core, "running_weight",  &m_stat_running_weight[core]);
+    registerStatsMetric("scheduler", core, "dtm_action",      &m_stat_dtm_action[core]);
+  }
+
   std::cout << "[CFS-Lite] initialized (cores="
             << Sim()->getConfig()->getApplicationCores()
             << ", target_latency_ns="
@@ -677,15 +689,12 @@ void SchedulerCFSLite::initDtmPolicy(const String &logic) {
         "scheduler/cfs_lite/dtm/adaptive/t_warn");
     float t_crit = (float)Sim()->getCfg()->getFloat(
         "scheduler/cfs_lite/dtm/adaptive/t_crit");
-    float t_recover = (float)Sim()->getCfg()->getFloat(
-        "scheduler/cfs_lite/dtm/adaptive/t_recover");
-    float alpha_mem = (float)Sim()->getCfg()->getFloat(
-        "scheduler/cfs_lite/dtm/adaptive/alpha_mem");
+
     int min_freq = Sim()->getCfg()->getInt(
         "scheduler/cfs_lite/dtm/adaptive/min_frequency");
     int max_freq = (int)(1000 * Sim()->getCfg()->getFloat(
-                                     "perf_model/core/max_frequency") +
-                          0.5);
+                                    "perf_model/core/max_frequency") +
+                         0.5);
     int freq_step = (int)(1000 * Sim()->getCfg()->getFloat(
                                      "perf_model/core/frequency_step_size") +
                           0.5);
@@ -702,13 +711,12 @@ void SchedulerCFSLite::initDtmPolicy(const String &logic) {
 
     m_dtm_policy = new DtmAdaptive(
         m_performance_counters, num_cores, cores_in_x, cores_in_y, num_banks,
-        num_channels, t_warn, t_crit, alpha_mem, min_freq, max_freq, freq_step, t_recover,
-        k_max, slack_scale, mem_thresh, mpki_thresh, freq_hist);
+        num_channels, t_warn, t_crit, min_freq, max_freq, freq_step, k_max,
+        slack_scale, mem_thresh, mpki_thresh, freq_hist);
 
     std::cout << "[CFS-Lite] DTM policy: adaptive"
               << "  t_warn=" << t_warn << "  t_crit=" << t_crit
-              << "  alpha_mem=" << alpha_mem << "  min_freq=" << min_freq
-              << " MHz"
+              << "  min_freq=" << min_freq << " MHz"
               << "  channels=" << num_channels << "  k_max=" << k_max
               << "  mpki_threshold=" << mpki_thresh
               << "  freq_history_len=" << freq_hist << std::endl;
@@ -1239,9 +1247,13 @@ void SchedulerCFSLite::handleDTM(SubsecondTime time) {
   std::vector<DtmDecision> decisions =
       m_dtm_policy->getDecisions(running, weights, rq_empty);
 
+  std::fill(m_stat_dtm_action.begin(), m_stat_dtm_action.end(), 0);
+
   for (const DtmDecision &d : decisions) {
     switch (d.action) {
     case DtmAction::DVFS:
+      if (d.core_id >= 0 && d.core_id < num_cores)
+          m_stat_dtm_action[d.core_id] = 1;
       setCoreFrequency(d.core_id, d.target_freq);
       if (m_performance_counters) {
         new_freqs[d.core_id] = d.target_freq;
@@ -1278,6 +1290,8 @@ void SchedulerCFSLite::handleDTM(SubsecondTime time) {
       break;
 
     case DtmAction::MIGRATE:
+      if (d.core_id >= 0 && d.core_id < num_cores)
+          m_stat_dtm_action[d.core_id] = 3;
       if (m_dtm_enable_migration)
         migrateThread((thread_id_t)d.thread_id, (core_id_t)d.target_core, time);
       break;
@@ -1341,6 +1355,18 @@ void SchedulerCFSLite::periodic(SubsecondTime time) {
       rescheduleCore(time, core_id, true);
     } else {
       m_slice_left[core_id] -= delta_cycles;
+    }
+  }
+
+  // Update ground-truth stats for Python observability
+  for (core_id_t core_id = 0; core_id < (core_id_t)m_core_thread_running.size(); ++core_id) {
+    thread_id_t tid = m_core_thread_running[core_id];
+    if (tid == INVALID_THREAD_ID) {
+      m_stat_running_thread[core_id] = (UInt64)-1;
+      m_stat_running_weight[core_id] = 0.0;
+    } else {
+      m_stat_running_thread[core_id] = (UInt64)tid;
+      m_stat_running_weight[core_id] = m_thread_info[tid].getWeight();
     }
   }
 

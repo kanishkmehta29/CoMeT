@@ -36,7 +36,7 @@ public:
               int cores_in_x, int cores_in_y, int num_banks, int num_channels,
               float t_warn, float t_crit, float alpha_mem, int min_freq_mhz,
               int max_freq_mhz,
-              int freq_step_mhz, float t_recover, int k_max, float slack_scale,
+              int freq_step_mhz, int k_max, float slack_scale,
               float mem_intensity_threshold, float mpki_threshold,
               int freq_history_len);
 
@@ -61,8 +61,7 @@ private:
   int m_banks_per_channel; ///< num_banks / num_channels (floored).
   int m_cores_per_channel; ///< num_cores / num_channels (floored).
   float m_t_warn;
-  float m_t_crit;
-  float m_t_recover; ///< Temperature below which throttled banks are restored.
+  float m_t_crit; ///< Temperature (°C) that triggers emergency max-throttle.
   float m_alpha_mem;
   int m_min_freq;
   int m_max_freq;

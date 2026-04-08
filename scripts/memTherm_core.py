@@ -125,6 +125,8 @@ c_hotspot_layer_file  =   hotspot_config_path + sim.config.get('hotspot/layer_fi
 # Output Parameters for hotspot simulation
 combined_temperature_trace_file = sim.config.get('hotspot/log_files/combined_temperature_trace_file')
 combined_instruction_trace_file = combined_temperature_trace_file.replace("temperature", "instruction")
+combined_thread_mapping_trace_file = combined_temperature_trace_file.replace("temperature", "thread_mapping")
+combined_thread_weight_trace_file = combined_temperature_trace_file.replace("temperature", "thread_weight")
 combined_insttemperature_trace_file = sim.config.get('hotspot/log_files/combined_insttemperature_trace_file')
 combined_power_trace_file = sim.config.get('hotspot/log_files/combined_power_trace_file')
 combined_instpower_trace_file = sim.config.get('hotspot/log_files/combined_instpower_trace_file')
@@ -332,6 +334,8 @@ class memTherm:
         'stat_wr_lowpower': [ self.getStatsGetter(stat_component_wr_lowpower, bank, stat_name_write_lowpower) for bank in range(NUM_BANKS) ],
         'stat_bank_mode': [ self.getStatsGetter(stat_component_bank_mode, bank, stat_name_bank_mode) for bank in range(NUM_BANKS)],
         'instrs': [ self.getStatsGetter('performance_model', core, 'instruction_count') for core in range(sim.config.ncores) ],
+        'running_thread': [ self.getStatsGetter('scheduler', core, 'running_thread') for core in range(sim.config.ncores) ],
+        'running_weight': [ self.getStatsGetter('scheduler', core, 'running_weight') for core in range(sim.config.ncores) ],
       }
     else:
       self.stats = {
@@ -341,6 +345,8 @@ class memTherm:
       'stat_wr': [ self.getStatsGetter(stat_component_wr, bank, stat_name_write) for bank in range(NUM_BANKS) ],
       'stat_bank_mode': [ self.getStatsGetter(stat_component_bank_mode, bank, stat_name_bank_mode) for bank in range(NUM_BANKS)],
       'instrs': [ self.getStatsGetter('performance_model', core, 'instruction_count') for core in range(sim.config.ncores) ],
+      'running_thread': [ self.getStatsGetter('scheduler', core, 'running_thread') for core in range(sim.config.ncores) ],
+      'running_weight': [ self.getStatsGetter('scheduler', core, 'running_weight') for core in range(sim.config.ncores) ],
       }
     #print the initial header into different log/trace files
     core_header = ""
@@ -348,6 +354,12 @@ class memTherm:
         core_header += "C_" + str(core) + "\t"
     with open(combined_instruction_trace_file, "w") as f:
         f.write("%s\n" % core_header)
+
+    with open(combined_thread_mapping_trace_file, "w") as f:
+      f.write("%s\n" % core_header)
+
+    with open(combined_thread_weight_trace_file, "w") as f:
+      f.write("%s\n" % core_header)
 
     gen_ptrace_header()
     ptrace_header = gen_ptrace_header()
@@ -697,6 +709,37 @@ class memTherm:
 
   # invokes hotspot to generate the temperature trace
   def calc_temperature_trace(self, time, time_delta):
+    # Per-core thread id and scheduler weight snapshots are logged once per epoch.
+    # They are used to reconstruct thread-level throughput and CFS share.
+    thread_map_string = ""
+    thread_weight_string = ""
+
+    for core in range(sim.config.ncores):
+      tid_raw = self.stats['running_thread'][core].last
+      if tid_raw is None:
+        tid = -1
+      else:
+        tid = int(tid_raw)
+        # running_thread is exported from C++ as UInt64; idle is stored as -1
+        # and may appear as a large unsigned value in Python.
+        if tid > 9000000000000000000:
+          tid = -1
+
+      w_raw = self.stats['running_weight'][core].last
+      if (w_raw is None) or (tid == -1):
+        w = 0.0
+      else:
+        w = float(w_raw)
+
+      thread_map_string += str(tid) + "\t"
+      thread_weight_string += str(w) + "\t"
+
+    with open(combined_thread_mapping_trace_file, "a") as f:
+      f.write("%s\n" % thread_map_string)
+
+    with open(combined_thread_weight_trace_file, "a") as f:
+      f.write("%s\n" % thread_weight_string)
+
     # Retrieve and write instruction trace
     instr_trace_string = ""
     for core in range(sim.config.ncores):
