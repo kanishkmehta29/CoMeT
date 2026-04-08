@@ -5,6 +5,7 @@
 #include "cond.h"
 #include "hooks_manager.h"
 
+#include <fstream>
 #include <vector>
 
 class CoreManager;
@@ -20,9 +21,16 @@ class BarrierSyncServer : public ClockSkewMinimizationServer
       std::vector<core_id_t> m_to_release;
       std::vector<core_id_t> m_core_group;
       std::vector<thread_id_t> m_core_thread;
+      std::vector<UInt64> m_last_instruction_count;
       SubsecondTime m_global_time;
       bool m_fastforward;
       volatile bool m_disable;
+
+      std::ofstream m_barrier_instruction_trace;
+      std::ofstream m_barrier_thread_mapping_trace;
+      std::ofstream m_barrier_thread_weight_trace;
+      bool m_barrier_trace_enabled;
+      bool m_barrier_trace_counters_ready;
 
       bool isBarrierReached(void);
       bool barrierRelease(thread_id_t thread_id = INVALID_THREAD_ID, bool continue_until_release = false);
@@ -31,6 +39,8 @@ class BarrierSyncServer : public ClockSkewMinimizationServer
       void releaseThread(thread_id_t thread_id);
       void signal();
       void doRelease(int n);
+      void initializeBarrierTraceFiles();
+      void dumpBarrierStats();
 
       static SInt64 hookThreadExit(UInt64 object, UInt64 argument) {
          ((BarrierSyncServer*)object)->threadExit((HooksManager::ThreadTime*)argument); return 0;

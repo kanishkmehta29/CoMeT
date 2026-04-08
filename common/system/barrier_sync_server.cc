@@ -21,9 +21,12 @@ BarrierSyncServer::BarrierSyncServer()
    , m_core_cond(Sim()->getConfig()->getApplicationCores(), NULL)
    , m_core_group(Sim()->getConfig()->getApplicationCores(), INVALID_CORE_ID)
    , m_core_thread(Sim()->getConfig()->getApplicationCores(), INVALID_THREAD_ID)
+   , m_last_instruction_count(Sim()->getConfig()->getApplicationCores(), 0)
    , m_global_time(SubsecondTime::Zero())
    , m_fastforward(false)
    , m_disable(false)
+   , m_barrier_trace_enabled(false)
+   , m_barrier_trace_counters_ready(false)
 {
    try
    {
@@ -45,12 +48,111 @@ BarrierSyncServer::BarrierSyncServer()
    Sim()->getHooksManager()->registerHook(HookType::HOOK_THREAD_MIGRATE, BarrierSyncServer::hookThreadMigrate, (UInt64)this, HooksManager::ORDER_NOTIFY_POST);
 
    registerStatsMetric("barrier", 0, "global_time", &m_global_time);
+
+   initializeBarrierTraceFiles();
 }
 
 BarrierSyncServer::~BarrierSyncServer()
 {
+   if (m_barrier_instruction_trace.is_open())
+      m_barrier_instruction_trace.close();
+   if (m_barrier_thread_mapping_trace.is_open())
+      m_barrier_thread_mapping_trace.close();
+   if (m_barrier_thread_weight_trace.is_open())
+      m_barrier_thread_weight_trace.close();
+
    for(core_id_t core_id = 0; core_id < (core_id_t)Sim()->getConfig()->getApplicationCores(); ++core_id)
       delete m_core_cond[core_id];
+}
+
+void
+BarrierSyncServer::initializeBarrierTraceFiles()
+{
+   const String instruction_path = Sim()->getConfig()->formatOutputFileName("barrier_instruction.trace");
+   const String mapping_path = Sim()->getConfig()->formatOutputFileName("barrier_thread_mapping.trace");
+   const String weight_path = Sim()->getConfig()->formatOutputFileName("barrier_thread_weight.trace");
+
+   m_barrier_instruction_trace.open(instruction_path.c_str(), std::ios::out | std::ios::trunc);
+   m_barrier_thread_mapping_trace.open(mapping_path.c_str(), std::ios::out | std::ios::trunc);
+   m_barrier_thread_weight_trace.open(weight_path.c_str(), std::ios::out | std::ios::trunc);
+
+   if (!m_barrier_instruction_trace.is_open() || !m_barrier_thread_mapping_trace.is_open() || !m_barrier_thread_weight_trace.is_open())
+   {
+      LOG_PRINT_WARNING("Could not open barrier-level trace files (%s, %s, %s)", instruction_path.c_str(), mapping_path.c_str(), weight_path.c_str());
+      m_barrier_trace_enabled = false;
+      return;
+   }
+
+   const UInt32 ncores = Sim()->getConfig()->getApplicationCores();
+   for (UInt32 core_id = 0; core_id < ncores; ++core_id)
+   {
+      m_barrier_instruction_trace << "C_" << core_id << "\t";
+      m_barrier_thread_mapping_trace << "C_" << core_id << "\t";
+      m_barrier_thread_weight_trace << "C_" << core_id << "\t";
+      m_last_instruction_count[core_id] = 0;
+   }
+
+   m_barrier_instruction_trace << "\n";
+   m_barrier_thread_mapping_trace << "\n";
+   m_barrier_thread_weight_trace << "\n";
+   m_barrier_trace_enabled = true;
+   m_barrier_trace_counters_ready = false;
+}
+
+void
+BarrierSyncServer::dumpBarrierStats()
+{
+   if (!m_barrier_trace_enabled)
+      return;
+
+   const UInt32 ncores = Sim()->getConfig()->getApplicationCores();
+
+   if (!m_barrier_trace_counters_ready)
+   {
+      for (UInt32 core_id = 0; core_id < ncores; ++core_id)
+      {
+         Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
+         if (!core || !core->getPerformanceModel())
+            return;
+      }
+
+      for (UInt32 core_id = 0; core_id < ncores; ++core_id)
+      {
+         Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
+         m_last_instruction_count[core_id] = core->getPerformanceModel()->getInstructionCount();
+      }
+
+      m_barrier_trace_counters_ready = true;
+   }
+
+   for (UInt32 core_id = 0; core_id < ncores; ++core_id)
+   {
+      Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
+      UInt64 current_icount = core->getPerformanceModel()->getInstructionCount();
+      UInt64 delta_icount = current_icount - m_last_instruction_count[core_id];
+      m_last_instruction_count[core_id] = current_icount;
+
+      UInt64 running_weight = 0;
+      StatsMetricBase *weight_metric = Sim()->getStatsManager()->getMetricObject("scheduler", core_id, "running_weight");
+      if (weight_metric)
+         running_weight = weight_metric->recordMetric();
+
+      thread_id_t tid = INVALID_THREAD_ID;
+      if (core->getThread() && (core->getState() == Core::RUNNING || core->getState() == Core::INITIALIZING))
+         tid = core->getThread()->getId();
+
+      m_barrier_instruction_trace << delta_icount << "\t";
+      if (tid == INVALID_THREAD_ID)
+         m_barrier_thread_mapping_trace << -1 << "\t";
+      else
+         m_barrier_thread_mapping_trace << (UInt64)tid << "\t";
+
+      m_barrier_thread_weight_trace << running_weight << "\t";
+   }
+
+   m_barrier_instruction_trace << "\n";
+   m_barrier_thread_mapping_trace << "\n";
+   m_barrier_thread_weight_trace << "\n";
 }
 
 void
@@ -269,6 +371,7 @@ BarrierSyncServer::barrierRelease(thread_id_t caller_id, bool continue_until_rel
       m_global_time = m_next_barrier_time;
       CLOG("barrier", "Barrier %" PRId64 "ns", m_next_barrier_time.getNS());
       Sim()->getHooksManager()->callHooks(HookType::HOOK_PERIODIC, static_cast<subsecond_time_t>(m_next_barrier_time).m_time);
+      dumpBarrierStats();
 
       if (continue_until_release)
       {
