@@ -94,6 +94,7 @@ class SchedulerCFSLite : public SchedulerDynamic
       DVFSPolicy *m_dvfs_policy;
       DramPolicy *m_dram_policy;
       DtmPolicy  *m_dtm_policy;    ///< Pluggable thermal management policy (nullptr = off)  [from file 1]
+      SubsecondTime m_dtm_epoch;
       SubsecondTime m_dvfs_epoch;
       SubsecondTime m_dram_epoch;
 

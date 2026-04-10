@@ -40,8 +40,10 @@
 
 DtmAdaptive::DtmAdaptive(const PerformanceCounters *perf_counters,
                          int num_cores, int cores_in_x, int cores_in_y,
-                         int num_banks, int num_channels, float t_warn,
-                         float t_crit, int min_freq_mhz, int max_freq_mhz,
+                         int num_banks, int num_channels, float core_t_warn,
+                         float core_t_crit, float mem_t_warn,
+                         float mem_t_crit, int min_freq_mhz,
+                         int max_freq_mhz,
                          int freq_step_mhz, int k_max, float slack_scale,
                          float mem_intensity_threshold, float mpki_threshold,
                          int freq_history_len)
@@ -50,7 +52,9 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters *perf_counters,
       m_num_channels(std::max(1, num_channels)),
       m_banks_per_channel(std::max(1, num_banks / std::max(1, num_channels))),
       m_cores_per_channel(std::max(1, num_cores / std::max(1, num_channels))),
-      m_t_warn(t_warn), m_t_crit(t_crit), m_min_freq(min_freq_mhz),
+      m_core_t_warn(core_t_warn), m_core_t_crit(core_t_crit),
+      m_mem_t_warn(mem_t_warn), m_mem_t_crit(mem_t_crit),
+      m_min_freq(min_freq_mhz),
       m_max_freq(max_freq_mhz), m_freq_step(freq_step_mhz), m_k_max(k_max),
       m_slack_scale(slack_scale),
       m_mem_intensity_threshold(mem_intensity_threshold),
@@ -76,7 +80,10 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters *perf_counters,
 
   if (m_log.is_open())
     m_log << "[DTM-Adaptive] initialized"
-          << " t_warn=" << m_t_warn << " t_crit=" << m_t_crit
+          << " core_t_warn=" << m_core_t_warn
+          << " core_t_crit=" << m_core_t_crit
+          << " mem_t_warn=" << m_mem_t_warn
+          << " mem_t_crit=" << m_mem_t_crit
           << " min_freq=" << m_min_freq << " MHz"
           << " num_banks=" << m_num_banks << " channels=" << m_num_channels
           << " k_max=" << m_k_max << " mpki_threshold=" << m_mpki_threshold
@@ -92,18 +99,20 @@ DtmAdaptive::DtmAdaptive(const PerformanceCounters *perf_counters,
  *
  * Classifies a core as memory-bound using MPKI (Misses Per Kilo Instruction).
  *
- * MPKI = (mem_dram_cpi / total_cpi) * 1000
+ * MPKI = (delta_cache_misses / delta_instructions) * 1000
  *
- * This gives the fraction of cycles spent waiting on DRAM, scaled per thousand
- * instructions.  A high MPKI means the core stalls heavily on memory and is
+ * This uses interval miss and instruction deltas, scaled per thousand
+ * instructions. A high MPKI means the core stalls heavily on memory and is
  * memory-bound.  The threshold (m_mpki_threshold, e.g., 10.0) is configurable
  * in base.cfg via scheduler/cfs_lite/dtm/adaptive/mpki_threshold.
  *
- * Falls back to the old utilization heuristic if DRAM CPI data is unavailable
- * (metric returns 0 before the first epoch is warmup complete).
+ * Falls back to the utilization heuristic when miss metrics are unavailable
+ * or when the current sample has too few instructions.
  */
 bool DtmAdaptive::isMemoryBound(int core_id) {
   if (!m_perf)
+    return false;
+  if (core_id < 0 || core_id >= m_num_cores)
     return false;
 
   // 1. Fetch current raw counters
@@ -121,6 +130,7 @@ bool DtmAdaptive::isMemoryBound(int core_id) {
     miss_load = stats->getMetricObject("L2", core_id, "load-misses");
     miss_store = stats->getMetricObject("L2", core_id, "store-misses");
   }
+  const bool have_miss_metrics = (miss_load != NULL) || (miss_store != NULL);
 
   uint64_t miss = 0;
   if (miss_load)
@@ -134,15 +144,14 @@ bool DtmAdaptive::isMemoryBound(int core_id) {
   uint64_t d_miss =
       miss > m_prev_miss[core_id] ? miss - m_prev_miss[core_id] : 0;
 
-  // 3. Prevent noise if the core is heavily stalled (not enough instructions to
-  // sample) Provide a minimum threshold of ~10,000 instructions to generate a
-  // meaningful MPKI.
+  // 3. Fast-epoch robust MPKI update with fixed weights.
+  // Tuned for 1ms DTM ticks with ~2ms smoothing half-life.
   double mpki = m_prev_mpki[core_id]; // default to previous
-  if (d_instr >= 10000) {
+  if (have_miss_metrics && d_instr > 0) {
     double raw_mpki = ((double)d_miss / (double)d_instr) * 1000.0;
-
-    // 4. Exponential Moving Average to smooth oscillations
-    mpki = 0.7 * m_prev_mpki[core_id] + 0.3 * raw_mpki;
+    const double kPrev = 0.7;
+    const double kRaw = 0.3;
+    mpki = kPrev * m_prev_mpki[core_id] + kRaw * raw_mpki;
   }
 
   // 5. Save state for next tick
@@ -150,24 +159,19 @@ bool DtmAdaptive::isMemoryBound(int core_id) {
   m_prev_miss[core_id] = miss;
   m_prev_mpki[core_id] = mpki;
 
-  // 6. Classification for output
-  std::string nature;
-  if (mpki < 1.0)
-    nature = "Compute-bound";
-  else if (mpki < 10.0)
-    nature = "Cache-friendly";
-  else
-    nature = "Memory-bound";
+  // 6. Classification.
+  // For very small instruction samples or missing miss metrics, fall back to
+  // utilization-based memory-intensity threshold from config.
+  // (Lower utilization usually indicates memory-stall dominated execution.)
+  const bool mpki_mem_bound = (mpki >= m_mpki_threshold);
+  const uint64_t min_instr_for_mpki_only = 500;
+  if (!have_miss_metrics || d_instr < min_instr_for_mpki_only) {
+    const double util = m_perf->getUtilizationOfCore(core_id);
+    const bool util_mem_bound = (util < (double)m_mem_intensity_threshold);
+    return util_mem_bound || mpki_mem_bound;
+  }
 
-  // if (m_log.is_open()) m_log << "[DTM-Adaptive] memBound-Check core " <<
-  // core_id
-  //           << " d_instr=" << d_instr
-  //           << " d_miss=" << d_miss
-  //           << " MPKI=" << mpki
-  //           << " (" << nature << ")"
-  //           << std::endl;
-
-  return (mpki >= m_mpki_threshold);
+  return mpki_mem_bound;
 }
 
 /**
@@ -259,13 +263,13 @@ bool DtmAdaptive::isThrashing(int core_id, CoreStats coreStats) const {
  *
  * Eligibility:
  *  - idle neighbour (tid == -1) OR
- *  - running a low-priority thread (weight <= avg_weight)
+ *  - running a low-priority thread (weight <= median_weight)
  *
  * No wrap-around across edges.
  */
 std::vector<int> DtmAdaptive::getAdjacentLpNeighbors(
     int core_id, const std::vector<int> &core_thread_running,
-    const std::map<int, double> &thread_weights, double avg_weight) const {
+    const std::map<int, double> &thread_weights, double median_weight) const {
   std::vector<int> neighbors;
   if (m_cores_in_x <= 0 || m_cores_in_y <= 0)
     return neighbors;
@@ -296,7 +300,7 @@ std::vector<int> DtmAdaptive::getAdjacentLpNeighbors(
     auto it = thread_weights.find(tid);
     if (it != thread_weights.end())
       w = it->second;
-    return (w <= avg_weight);
+    return (w <= median_weight);
   };
 
   auto push_if_eligible = [&](int nid) {
@@ -327,7 +331,7 @@ std::vector<int> DtmAdaptive::getAdjacentLpNeighbors(
  */
 int DtmAdaptive::getCoolestTargetCore(
     int source_core, const std::vector<int> &core_thread_running,
-    const std::map<int, double> &thread_weights, double avg_weight) const {
+    const std::map<int, double> &thread_weights, double median_weight) const {
   if (!m_perf)
     return -1;
 
@@ -348,8 +352,8 @@ int DtmAdaptive::getCoolestTargetCore(
       if (it != thread_weights.end())
         weight_c = it->second;
 
-      // Target must be running a low-priority task (weight < avg_weight)
-      if (weight_c >= avg_weight)
+      // Target must be running a low-priority task (weight < median_weight)
+      if (weight_c >= median_weight)
         continue;
     }
 
@@ -427,7 +431,7 @@ double DtmAdaptive::channelUtilization(int ch) const {
 }
 
 int DtmAdaptive::throttleMagnitude(double T) const {
-  double slack = m_t_crit - T;
+  double slack = m_mem_t_crit - T;
   if (slack <= 0.0)
     return m_k_max;
   int k = (int)std::round((double)m_k_max *
@@ -444,7 +448,7 @@ double DtmAdaptive::bankScore(int bank_id) const {
   // provided by individual bank temperatures.
   int assoc_core = bank_id % m_num_cores;
   double thermal_slack =
-      (double)m_t_crit - m_perf->getTemperatureOfBank(bank_id);
+      (double)m_mem_t_crit - m_perf->getTemperatureOfBank(bank_id);
   // Use smoothed per-core MPKI as memory-access-intensity proxy.
   // (m_prev_mpki is updated every DTM tick by isMemoryBound().)
   double access_weight = std::log(m_prev_mpki[assoc_core] + 1.0);
@@ -464,6 +468,45 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
   if (!m_perf)
     return decisions;
 
+  // Top-level arbitration: run only one DTM side per epoch.
+  // Select the side with smaller thermal slack to critical temperature.
+  //   core_slack = core_t_crit - max(core temps)
+  //   mem_slack  = mem_t_crit - max(bank temps)
+  // Lower slack means closer to critical and gets priority this epoch.
+  double max_core_temp = 0.0;
+  for (int c = 0; c < m_num_cores; ++c) {
+    double t = m_perf->getTemperatureOfCore(c);
+    if (t > max_core_temp)
+      max_core_temp = t;
+  }
+
+  double max_mem_temp = 0.0;
+  for (int b = 0; b < m_num_banks; ++b) {
+    double t = m_perf->getTemperatureOfBank(b);
+    if (t > max_mem_temp)
+      max_mem_temp = t;
+  }
+
+  bool have_core_temp = (max_core_temp > 0.0);
+  bool have_mem_temp = (max_mem_temp > 0.0);
+  bool run_core_dtm = false;
+  bool run_mem_dtm = false;
+
+  if (have_core_temp && have_mem_temp) {
+    double core_slack = m_core_t_crit - max_core_temp;
+    double mem_slack = m_mem_t_crit - max_mem_temp;
+    if (core_slack <= mem_slack)
+      run_core_dtm = true;
+    else
+      run_mem_dtm = true;
+  } else if (have_core_temp) {
+    run_core_dtm = true;
+  } else if (have_mem_temp) {
+    run_mem_dtm = true;
+  } else {
+    return decisions;
+  }
+
   // ── Cache Memory-Bound Status ───────────────────────────────────────────
   // Cache to avoid side-effects (updating instr/miss counters) from multiple
   // calls per tick in both Phase 1 and Phase 2.
@@ -472,31 +515,32 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     core_is_mem_bound[i] = isMemoryBound(i);
   }
 
-  // ── Calculate relative priority baseline ──────────────────────────────────
-  // Use median of ALL threads (both running and queued) to avoid skewed
-  // averages
-  std::vector<double> w;
-  for (const auto &w_pair : thread_weights) {
-    if (w_pair.second > 0.0) {
-      w.push_back(w_pair.second);
+  if (run_core_dtm) {
+    // ── Calculate relative priority baseline ────────────────────────────────
+    // Use median of ALL threads (both running and queued) to avoid skewed
+    // averages
+    std::vector<double> w;
+    for (const auto &w_pair : thread_weights) {
+      if (w_pair.second > 0.0) {
+        w.push_back(w_pair.second);
+      }
     }
-  }
 
-  double avg_weight =
-      0.0; // We keep the variable name avg_weight but it stores the median
-  if (!w.empty()) {
-    std::sort(w.begin(), w.end());
-    avg_weight = w[w.size() / 2];
-  }
+    double median_weight =
+        0.0; // We keep the variable name median_weight but it stores the median
+    if (!w.empty()) {
+      std::sort(w.begin(), w.end());
+      median_weight = w[w.size() / 2];
+    }
 
-  // if (m_log.is_open()) {
-  //   m_log << "[DTM-Adaptive] tick thermal weights: ";
-  //   for (double weight_val : w)
-  //     m_log << weight_val << " ";
-  //   m_log << " | median=" << avg_weight << std::endl;
-  // }
+    // if (m_log.is_open()) {
+    //   m_log << "[DTM-Adaptive] tick thermal weights: ";
+    //   for (double weight_val : w)
+    //     m_log << weight_val << " ";
+    //   m_log << " | median=" << median_weight << std::endl;
+    // }
 
-  for (int i = 0; i < m_num_cores; ++i) {
+    for (int i = 0; i < m_num_cores; ++i) {
     // Update frequency history for this core at the start of every tick.
     recordFreq(i);
 
@@ -510,7 +554,7 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     //       dbg_w = it->second;
     //   }
     //   m_epoch_log << "[DTM][EPOCH] core=" << i << " tid=" << dbg_tid
-    //         << " weight=" << dbg_w << " avg_weight=" << avg_weight <<
+    //         << " weight=" << dbg_w << " median_weight=" << median_weight <<
     //         std::endl;
     // }
 
@@ -521,7 +565,7 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
       continue; // temperature data not yet available (first epoch)
 
     // ── Bank recovery: if this core has cooled, restore its banks ─────────
-    if (T < m_t_warn) {
+    if (T < m_core_t_warn) {
       m_recently_yielded_tid[i] =
           -1; // Core has cooled — clear yielded-thread record
 
@@ -557,11 +601,11 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
       continue; // core is cool — no further action
     }
 
-    if (T > m_t_crit) {
+    if (T > m_core_t_crit) {
       // Emergency: slam frequency to hardware minimum
       if (m_log.is_open())
         m_log << "[DTM-Adaptive] EMERGENCY throttle core " << i << " T=" << T
-              << " > T_crit=" << m_t_crit << std::endl;
+              << " > T_crit=" << m_core_t_crit << std::endl;
       DtmDecision d;
       d.action = DtmAction::DVFS;
       d.core_id = i;
@@ -581,7 +625,7 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
     if (it != thread_weights.end())
       weight = it->second;
 
-    double hp_threshold = avg_weight;
+    double hp_threshold = median_weight;
     bool is_hp = (weight >= hp_threshold);
     bool is_lp = (weight < hp_threshold);
 
@@ -632,7 +676,7 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
         if (m_log.is_open())
           m_log << "[DTM-Adaptive] Branch1 yield core " << i
                 << " tid=" << thread_id << " weight=" << weight
-                << " avg_weight=" << avg_weight << " T=" << T << std::endl;
+                << " median_weight=" << median_weight << " T=" << T << std::endl;
         DtmDecision d;
         d.action = DtmAction::YIELD;
         d.thread_id = thread_id;
@@ -675,7 +719,7 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
       if (m_log.is_open())
         m_log << "[DTM-Adaptive] Branch3 ---------------------" << std::endl;
       int dst = getCoolestTargetCore(i, core_thread_running, thread_weights,
-                                     avg_weight);
+                                     median_weight);
       if (dst != -1 && dst != i) {
         if (m_log.is_open())
           m_log << "[DTM-Adaptive] Branch3 migrate HP tid=" << thread_id
@@ -708,11 +752,11 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
       // low-priority task, reduce its frequency to create a local thermal
       // sink — heat from the HP core dissipates into the cooler neighbour.
       std::vector<int> neighbors = getAdjacentLpNeighbors(
-          i, core_thread_running, thread_weights, avg_weight);
+          i, core_thread_running, thread_weights, median_weight);
       bool throttled_neighbor = false;
       for (int j : neighbors) {
         double T_j = m_perf->getTemperatureOfCore(j);
-        if (!(T_j > 0.0 && T_j < m_t_warn))
+        if (!(T_j > 0.0 && T_j < m_core_t_warn))
           continue;
 
         int cur_f_j = getCurrentFreq(j);
@@ -750,10 +794,12 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
         }
       }
     }
-  } // for each core  [Phase 1 end]
+    } // for each core  [Phase 1 end]
+  }
 
   // ── Phase 2: Per-channel Memory DTM ─────────────────────────────────────
-  for (int ch = 0; ch < m_num_channels; ++ch) {
+  if (run_mem_dtm) {
+    for (int ch = 0; ch < m_num_channels; ++ch) {
     std::vector<int> ch_banks = banksForChannel(ch);
     if (ch_banks.empty())
       continue;
@@ -769,7 +815,7 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
       continue;
 
     // Recovery: channel has cooled below t_warn — restore throttled banks.
-    if (T_ch < m_t_warn) {
+    if (T_ch < m_mem_t_warn) {
       for (int b : ch_banks) {
         if (m_bank_throttled[b]) {
           if (m_log.is_open())
@@ -786,10 +832,10 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
       continue;
     }
 
-    if (T_ch < m_t_warn)
+    if (T_ch < m_mem_t_warn)
       continue; // below warning — no new action
 
-    if (T_ch > m_t_crit) {
+    if (T_ch > m_mem_t_crit) {
       // Emergency: all banks in this channel to LPM.
       if (m_log.is_open())
         m_log << "[DTM-Adaptive] MemDTM EMERGENCY ch" << ch << "  T=" << T_ch
@@ -878,7 +924,8 @@ DtmAdaptive::getDecisions(const std::vector<int> &core_thread_running,
         m_bank_throttled[b] = ltm;
       }
     }
-  } // for each channel  [Phase 2 end]
+    } // for each channel  [Phase 2 end]
+  }
 
   return decisions;
 }

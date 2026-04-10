@@ -33,7 +33,8 @@ public:
    */
   DtmAdaptive(const PerformanceCounters *perf_counters, int num_cores,
               int cores_in_x, int cores_in_y, int num_banks, int num_channels,
-              float t_warn, float t_crit, int min_freq_mhz,
+              float core_t_warn, float core_t_crit,
+              float mem_t_warn, float mem_t_crit, int min_freq_mhz,
               int max_freq_mhz,
               int freq_step_mhz, int k_max, float slack_scale,
               float mem_intensity_threshold, float mpki_threshold,
@@ -59,8 +60,10 @@ private:
   int m_num_channels;      ///< Number of memory channels.
   int m_banks_per_channel; ///< num_banks / num_channels (floored).
   int m_cores_per_channel; ///< num_cores / num_channels (floored).
-  float m_t_warn;
-  float m_t_crit; ///< Temperature (°C) that triggers emergency max-throttle.
+  float m_core_t_warn;
+  float m_core_t_crit; ///< Core temperature (°C) emergency threshold.
+  float m_mem_t_warn;
+  float m_mem_t_crit; ///< Memory temperature (°C) emergency threshold.
   int m_min_freq;
   int m_max_freq;
   int m_freq_step;
@@ -116,11 +119,11 @@ private:
 
   std::vector<int> getAdjacentLpNeighbors(
       int core_id, const std::vector<int> &core_thread_running,
-      const std::map<int, double> &thread_weights, double avg_weight) const;
+      const std::map<int, double> &thread_weights, double median_weight) const;
   int getCoolestTargetCore(int source_core,
                            const std::vector<int> &core_thread_running,
                            const std::map<int, double> &thread_weights,
-                           double avg_weight) const;
+                           double median_weight) const;
   int getCurrentFreq(int core_id) const;
   std::vector<int> getBanksForCore(int core_id) const;
 
@@ -138,7 +141,7 @@ private:
 
   /**
    * Throttle magnitude for channel at temperature T.
-   * k = round(k_max × exp(−(T_crit − T) / slack_scale))
+  * k = round(k_max × exp(−(mem_T_crit − T) / slack_scale))
    * Clamped to [0, k_max].
    */
   int throttleMagnitude(double T) const;
@@ -146,7 +149,7 @@ private:
   /**
    * Score a bank for LTM selection.
    * score(b) = (N − C) × log(MAC + 1)
-   *   N   = m_t_crit      (thermal capacity limit)
+  *   N   = m_mem_t_crit  (thermal capacity limit)
    *   C   = T_bank        (current bank temperature)
    *   MAC = IPS_core      (memory access count proxy)
    * Lower score → throttled first (hot bank, low-utility core).

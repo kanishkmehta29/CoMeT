@@ -126,6 +126,8 @@ SchedulerCFSLite::SchedulerCFSLite(ThreadManager *thread_manager)
                  "scheduler/cfs_lite/load_balance/max_migrations_per_epoch"))),
       m_performance_counters(nullptr), m_dvfs_policy(nullptr),
       m_dram_policy(nullptr), m_dtm_policy(nullptr),
+        m_dtm_epoch(SubsecondTime::NS(
+          Sim()->getCfg()->getInt("scheduler/cfs_lite/dtm/epoch"))),
       m_dvfs_epoch(SubsecondTime::NS(
           Sim()->getCfg()->getInt("scheduler/cfs_lite/dvfs/dvfs_epoch"))),
       m_dram_epoch(SubsecondTime::NS(
@@ -195,7 +197,8 @@ SchedulerCFSLite::SchedulerCFSLite(ThreadManager *thread_manager)
             << (unsigned long long)m_min_granularity.getNS()
             << ", priority_mode=" << m_priority_mode
             << ", lb_enable=" << (m_lb_enable ? "true" : "false")
-            << ", lb_epoch_ns=" << (unsigned long long)m_lb_epoch.getNS() << ")"
+            << ", lb_epoch_ns=" << (unsigned long long)m_lb_epoch.getNS()
+            << ", dtm_epoch_ns=" << (unsigned long long)m_dtm_epoch.getNS() << ")"
             << std::endl;
 }
 
@@ -685,10 +688,14 @@ void SchedulerCFSLite::initDtmPolicy(const String &logic) {
     int num_banks = Sim()->getCfg()->getInt("memory/num_banks");
     int num_channels =
         Sim()->getCfg()->getInt("scheduler/cfs_lite/dtm/adaptive/num_channels");
-    float t_warn = (float)Sim()->getCfg()->getFloat(
+    float core_t_warn = (float)Sim()->getCfg()->getFloat(
         "scheduler/cfs_lite/dtm/adaptive/t_warn");
-    float t_crit = (float)Sim()->getCfg()->getFloat(
+    float core_t_crit = (float)Sim()->getCfg()->getFloat(
         "scheduler/cfs_lite/dtm/adaptive/t_crit");
+    float mem_t_warn = (float)Sim()->getCfg()->getFloat(
+      "scheduler/cfs_lite/dram/memAdaptive/t_warn");
+    float mem_t_crit = (float)Sim()->getCfg()->getFloat(
+      "scheduler/cfs_lite/dram/memAdaptive/t_crit");
 
     int min_freq = Sim()->getCfg()->getInt(
         "scheduler/cfs_lite/dtm/adaptive/min_frequency");
@@ -711,11 +718,15 @@ void SchedulerCFSLite::initDtmPolicy(const String &logic) {
 
     m_dtm_policy = new DtmAdaptive(
         m_performance_counters, num_cores, cores_in_x, cores_in_y, num_banks,
-        num_channels, t_warn, t_crit, min_freq, max_freq, freq_step, k_max,
-        slack_scale, mem_thresh, mpki_thresh, freq_hist);
+      num_channels, core_t_warn, core_t_crit, mem_t_warn, mem_t_crit,
+      min_freq, max_freq, freq_step, k_max, slack_scale, mem_thresh,
+      mpki_thresh, freq_hist);
 
     std::cout << "[CFS-Lite] DTM policy: adaptive"
-              << "  t_warn=" << t_warn << "  t_crit=" << t_crit
+          << "  core_t_warn=" << core_t_warn
+          << "  core_t_crit=" << core_t_crit
+          << "  mem_t_warn=" << mem_t_warn
+          << "  mem_t_crit=" << mem_t_crit
               << "  min_freq=" << min_freq << " MHz"
               << "  channels=" << num_channels << "  k_max=" << k_max
               << "  mpki_threshold=" << mpki_thresh
@@ -1335,7 +1346,9 @@ void SchedulerCFSLite::periodic(SubsecondTime time) {
   // Independent queued-thread load balancing for CFS-Lite.
   handleLoadBalance(time);
 
-  handleDTM(time);
+  if ((m_dtm_policy != NULL) && (time.getNS() % m_dtm_epoch.getNS() == 0)) {
+    handleDTM(time);
+  }
 
   SubsecondTime delta = time - m_last_periodic;
   double delta_ns = (double)delta.getNS();
