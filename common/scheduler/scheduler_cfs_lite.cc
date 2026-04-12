@@ -223,6 +223,9 @@ void SchedulerCFSLite::ensureThreadInfoSize(thread_id_t thread_id) {
 
   if (m_thread_home_core.size() <= (size_t)thread_id)
     m_thread_home_core.resize(thread_id + 16, INVALID_CORE_ID);
+
+  if (m_stat_thread_weight.size() <= (size_t)thread_id)
+    m_stat_thread_weight.resize(thread_id + 16, 0);
 }
 
 core_id_t SchedulerCFSLite::pickHomeCoreForThread(thread_id_t thread_id) const {
@@ -754,6 +757,12 @@ core_id_t SchedulerCFSLite::threadCreate(thread_id_t thread_id) {
   int priority = getThreadPriority(thread_id);
   m_thread_info[thread_id].setPriority(priority);
   m_thread_info[thread_id].setWeight(priorityToWeight(priority));
+
+  // Register a stable per-thread weight stat (keyed by thread_id, not core_id).
+  // This is the source of truth used by barrier_sync_server's weight trace,
+  // avoiding dependence on the volatile m_core_thread_running scheduler state.
+  m_stat_thread_weight[thread_id] = (UInt64)std::llround(m_thread_info[thread_id].getWeight());
+  registerStatsMetric("scheduler_thread", (UInt32)thread_id, "weight", &m_stat_thread_weight[thread_id]);
 
   std::cout << "[CFS-Lite] threadCreate t" << thread_id
             << " priority=" << priority

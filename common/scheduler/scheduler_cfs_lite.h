@@ -110,6 +110,7 @@ class SchedulerCFSLite : public SchedulerDynamic
       std::vector<UInt64> m_stat_running_thread;
       std::vector<UInt64> m_stat_running_weight;
       std::vector<UInt64> m_stat_dtm_action;
+      std::deque<UInt64> m_stat_thread_weight;  ///< [thread_id] = CFS weight, set once at threadCreate.
       SubsecondTime m_last_lb;                   ///< Timestamp of last load-balance pass  [from file 2]
 
       // Debug logging state

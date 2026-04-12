@@ -9,20 +9,49 @@
 #include <iostream>
 #include <map>
 
+namespace {
+long getCfgLongWithFallback(const char *primary_key, const char *fallback_key, long fallback_value)
+{
+   try { return atol(Sim()->getCfg()->getString(primary_key).c_str()); }
+   catch (...) {}
+   try { return atol(Sim()->getCfg()->getString(fallback_key).c_str()); }
+   catch (...) {}
+   return fallback_value;
+}
+
+int getCfgIntWithFallback(const char *primary_key, const char *fallback_key, int fallback_value)
+{
+   try { return Sim()->getCfg()->getInt(primary_key); }
+   catch (...) {}
+   try { return Sim()->getCfg()->getInt(fallback_key); }
+   catch (...) {}
+   return fallback_value;
+}
+
+bool getCfgBoolArrayWithFallback(const char *primary_key, const char *fallback_key, int index, bool fallback_value)
+{
+   try { return Sim()->getCfg()->getBoolArray(primary_key, index); }
+   catch (...) {}
+   try { return Sim()->getCfg()->getBoolArray(fallback_key, index); }
+   catch (...) {}
+   return fallback_value;
+}
+}
+
 SchedulerOpenSimple::SchedulerOpenSimple(ThreadManager *thread_manager)
-   : SchedulerPinnedBase(thread_manager, SubsecondTime::NS(Sim()->getCfg()->getInt("scheduler/open_simple/quantum")))
+   : SchedulerPinnedBase(thread_manager, SubsecondTime::NS((UInt64)getCfgIntWithFallback("scheduler/open_simple/quantum", "scheduler/pinned/quantum", 1000000)))
    , m_performance_counters(NULL)
    , m_dvfs_policy(NULL)
    , m_dram_policy(NULL)
-   , m_interleaving(Sim()->getCfg()->getInt("scheduler/open_simple/interleaving"))
+   , m_interleaving(getCfgIntWithFallback("scheduler/open_simple/interleaving", "scheduler/pinned/interleaving", 1))
    , m_next_core(0)
    , m_number_of_cores(Sim()->getConfig()->getApplicationCores())
    , m_number_of_banks(Sim()->getCfg()->getInt("memory/num_banks"))
    , m_min_frequency((int)(1000 * Sim()->getCfg()->getFloat("perf_model/core/min_frequency") + 0.5))
    , m_max_frequency((int)(1000 * Sim()->getCfg()->getFloat("perf_model/core/max_frequency") + 0.5))
    , m_frequency_step((int)(1000 * Sim()->getCfg()->getFloat("perf_model/core/frequency_step_size") + 0.5))
-   , m_dvfs_epoch(atol(Sim()->getCfg()->getString("scheduler/open_simple/dvfs/dvfs_epoch").c_str()))
-   , m_dram_epoch(atol(Sim()->getCfg()->getString("scheduler/open_simple/dram/dram_epoch").c_str()))
+   , m_dvfs_epoch(getCfgLongWithFallback("scheduler/open_simple/dvfs/dvfs_epoch", "scheduler/open/dvfs/dvfs_epoch", 1000000))
+   , m_dram_epoch(getCfgLongWithFallback("scheduler/open_simple/dram/dram_epoch", "scheduler/open/dram/dram_epoch", 1000000))
 {
    if (m_interleaving <= 0)
    {
@@ -33,7 +62,7 @@ SchedulerOpenSimple::SchedulerOpenSimple(ThreadManager *thread_manager)
    m_core_mask.resize(m_number_of_cores);
    for (core_id_t core_id = 0; core_id < (core_id_t)m_number_of_cores; ++core_id)
    {
-      m_core_mask[core_id] = Sim()->getCfg()->getBoolArray("scheduler/open_simple/core_mask", core_id);
+      m_core_mask[core_id] = getCfgBoolArrayWithFallback("scheduler/open_simple/core_mask", "scheduler/open/core_mask", core_id, true);
    }
 
    bool found_allowed_core = false;

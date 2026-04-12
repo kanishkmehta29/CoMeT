@@ -9,6 +9,7 @@
 #include <vector>
 
 class CoreManager;
+class StatsMetricBase;
 
 class BarrierSyncServer : public ClockSkewMinimizationServer
 {
@@ -31,6 +32,10 @@ class BarrierSyncServer : public ClockSkewMinimizationServer
       std::ofstream m_barrier_thread_weight_trace;
       bool m_barrier_trace_enabled;
       bool m_barrier_trace_counters_ready;
+
+      std::vector<StatsMetricBase*> m_core_running_thread_metrics;
+      std::vector<StatsMetricBase*> m_core_weight_metrics;
+      std::vector<StatsMetricBase*> m_thread_weight_metrics;
 
       bool isBarrierReached(void);
       bool barrierRelease(thread_id_t thread_id = INVALID_THREAD_ID, bool continue_until_release = false);

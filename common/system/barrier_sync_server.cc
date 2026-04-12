@@ -97,6 +97,9 @@ BarrierSyncServer::initializeBarrierTraceFiles()
    m_barrier_thread_weight_trace << "\n";
    m_barrier_trace_enabled = true;
    m_barrier_trace_counters_ready = false;
+
+   m_core_running_thread_metrics.resize(ncores, nullptr);
+   m_core_weight_metrics.resize(ncores, nullptr);
 }
 
 void
@@ -107,41 +110,97 @@ BarrierSyncServer::dumpBarrierStats()
 
    const UInt32 ncores = Sim()->getConfig()->getApplicationCores();
 
+   // First-epoch initialisation: snapshot baseline instruction counts.
+   // Use per-core guard so a single unready core doesn't abort the whole epoch.
    if (!m_barrier_trace_counters_ready)
    {
+      bool all_ready = true;
       for (UInt32 core_id = 0; core_id < ncores; ++core_id)
       {
          Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
          if (!core || !core->getPerformanceModel())
-            return;
-      }
-
-      for (UInt32 core_id = 0; core_id < ncores; ++core_id)
-      {
-         Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
+         {
+            all_ready = false;
+            continue; // leave m_last_instruction_count[core_id] == 0
+         }
          m_last_instruction_count[core_id] = core->getPerformanceModel()->getInstructionCount();
       }
-
-      m_barrier_trace_counters_ready = true;
+      if (all_ready)
+         m_barrier_trace_counters_ready = true;
+      // Continue even if not all ready — write partial zeros rather than skip the epoch.
    }
 
    for (UInt32 core_id = 0; core_id < ncores; ++core_id)
    {
       Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
-      UInt64 current_icount = core->getPerformanceModel()->getInstructionCount();
-      UInt64 delta_icount = current_icount - m_last_instruction_count[core_id];
-      m_last_instruction_count[core_id] = current_icount;
 
-      UInt64 running_weight = 0;
-      StatsMetricBase *weight_metric = Sim()->getStatsManager()->getMetricObject("scheduler", core_id, "running_weight");
-      if (weight_metric)
-         running_weight = weight_metric->recordMetric();
+      // ── Instruction delta ────────────────────────────────────────────────
+      UInt64 delta_icount = 0;
+      if (core && core->getPerformanceModel())
+      {
+         UInt64 current_icount = core->getPerformanceModel()->getInstructionCount();
+         delta_icount = current_icount - m_last_instruction_count[core_id];
+         m_last_instruction_count[core_id] = current_icount;
+      }
 
+      // ── Thread mapping ───────────────────────────────────────────────────
       thread_id_t tid = INVALID_THREAD_ID;
-      if (core->getThread() && (core->getState() == Core::RUNNING || core->getState() == Core::INITIALIZING))
-         tid = core->getThread()->getId();
+      
+      if (!m_core_running_thread_metrics[core_id])
+         m_core_running_thread_metrics[core_id] = Sim()->getStatsManager()->getMetricObject("scheduler", core_id, "running_thread");
+      
+      StatsMetricBase *thread_metric = m_core_running_thread_metrics[core_id];
+      if (thread_metric)
+      {
+         UInt64 r_tid = thread_metric->recordMetric();
+         if (r_tid == (UInt64)-1)
+            tid = INVALID_THREAD_ID;
+         else
+            tid = (thread_id_t)r_tid;
+      }
+      else
+      {
+         if (m_barrier_acquire_list[core_id] && m_core_thread[core_id] != INVALID_THREAD_ID)
+            tid = m_core_thread[core_id];
+         else if (core && core->getThread())
+            tid = core->getThread()->getId();
+      }
 
+      // ── Thread weight ────────────────────────────────────────────────────
+      // Prefer per-thread weight stat when available (CFS-lite). For other
+      // schedulers, fall back to per-core running_weight if exported, otherwise
+      // use a default active-thread weight.
+      UInt64 running_weight = 0;
+      if (tid != INVALID_THREAD_ID) {
+         if ((size_t)tid >= m_thread_weight_metrics.size())
+            m_thread_weight_metrics.resize(tid + 16, nullptr);
+         
+         if (!m_thread_weight_metrics[tid])
+            m_thread_weight_metrics[tid] = Sim()->getStatsManager()->getMetricObject("scheduler_thread", (UInt32)tid, "weight");
+         
+         StatsMetricBase *weight_metric = m_thread_weight_metrics[tid];
+
+         if (weight_metric)
+            running_weight = weight_metric->recordMetric();
+
+         if (!running_weight)
+         {
+            if (!m_core_weight_metrics[core_id])
+               m_core_weight_metrics[core_id] = Sim()->getStatsManager()->getMetricObject("scheduler", core_id, "running_weight");
+            
+            StatsMetricBase *core_weight_metric = m_core_weight_metrics[core_id];
+
+            if (core_weight_metric)
+               running_weight = core_weight_metric->recordMetric();
+         }
+
+         if (!running_weight)
+            running_weight = 1024;
+      }
+
+      // ── Emit ─────────────────────────────────────────────────────────────
       m_barrier_instruction_trace << delta_icount << "\t";
+
       if (tid == INVALID_THREAD_ID)
          m_barrier_thread_mapping_trace << -1 << "\t";
       else
@@ -168,7 +227,7 @@ BarrierSyncServer::synchronize(core_id_t core_id, SubsecondTime time)
       master_core_id = core_id;  // In fast-forward, the SMT performance model in not active so every core (HW context) calls into the barrier
    else
       master_core_id = m_core_group[core_id] == INVALID_CORE_ID ? core_id : m_core_group[core_id];
-   Core *master_core = Sim()->getCoreManager()->getCoreFromID(core_id);
+   Core *master_core = Sim()->getCoreManager()->getCoreFromID(master_core_id);
    thread_id_t thread_me = core->getThread()->getId();
 
    CLOG("barrier", "Core %d entry (master core %d, thread %d, ffwd %d)", core_id, master_core_id, thread_me, m_fastforward);

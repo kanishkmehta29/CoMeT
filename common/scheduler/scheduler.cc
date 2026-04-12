@@ -5,6 +5,7 @@
 #include "scheduler_big_small.h"
 #include "scheduler_sequential.h"
 #include "scheduler_open.h"
+#include "scheduler_open_simple.h"
 #include "scheduler_cfs_lite.h"
 #include "simulator.h"
 #include "config.hpp"
@@ -28,6 +29,8 @@ Scheduler* Scheduler::create(ThreadManager *thread_manager)
        return new SchedulerSequential(thread_manager);
 	else if (type == "open")
 		return new SchedulerOpen(thread_manager);
+   else if (type == "open_simple")
+      return new SchedulerOpenSimple(thread_manager);
    else if (type == "cfs_lite")
       return new SchedulerCFSLite(thread_manager);
    else
